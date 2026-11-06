@@ -2024,7 +2024,8 @@ void Device::RemoveUnsuitableExtensions() {
                                        VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
 
     // VK_EXT_robustness2
-    features.robustness2.robustBufferAccess2 = VK_FALSE;
+    // Keep robustBufferAccess2: games read storage buffers out of bounds and AMD returns garbage
+    // without it (Ocarina's Hyrule Field fog volume turned the sky white).
     features.robustness2.robustImageAccess2 = VK_FALSE;
     extensions.robustness_2 = features.robustness2.nullDescriptor;
 
