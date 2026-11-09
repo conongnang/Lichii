@@ -407,9 +407,9 @@ jobs:
           tools="$RUNNER_TEMP/linuxdeploy"
           mkdir -p "$tools"
           arch=$(uname -m)   # aarch64 or x86_64
-          curl -fsSL -o "$tools/linuxdeploy-$arch.AppImage" \
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 20 -o "$tools/linuxdeploy-$arch.AppImage" \
           https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage
-          curl -fsSL -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
+          curl -fsSL --retry 6 --retry-all-errors --retry-delay 20 -o "$tools/linuxdeploy-plugin-qt-$arch.AppImage" \
           https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage
           chmod +x "$tools"/*.AppImage
           # The desktop file names its icon io.github.zortos293.lichii.
