@@ -188,15 +188,15 @@ def load_save(slot):
     sys.exit("the save did not load")
 
 
-# A route that shows new things to draw: walk ahead, turn the camera around, walk back, then a full
-# camera sweep. In frames (at 60 fps about 18 s).
+# Walk, pan the camera, walk a bit more, pan, stop: about 5 s at 60 fps. Only the first seconds
+# after the start spot show the same scene run to run (NPCs and Link's path drift later), so keep
+# it short and use --walk 1.
 WALK_ROUTE = [
-    {"left_stick": [0, 1], "frames": 240},
-    {"right_stick": [1, 0], "frames": 90},
-    {"left_stick": [0, 1], "frames": 240},
-    {"right_stick": [-1, 0], "frames": 180},
-    {"left_stick": [1, 0.3], "frames": 180},
-    {"right_stick": [1, 0.2], "frames": 180},
+    {"left_stick": [0, 1], "frames": 90},
+    {"right_stick": [1, 0], "frames": 60},
+    {"left_stick": [0, 1], "frames": 60},
+    {"right_stick": [-1, 0], "frames": 60},
+    {"frames": 20},
 ]
 
 
