@@ -64,6 +64,7 @@
 #include "core/hle/service/hle_ipc.h"
 #include "core/hle/service/ipc_helpers.h"
 #include "core/hle/service/kernel_helpers.h"
+#include "core/hle/service/nx2_frame_hold.h"
 #include "core/hle/service/nvdrv/core/container.h"
 #include "core/hle/service/nvdrv/core/syncpoint_manager.h"
 #include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
@@ -1695,6 +1696,21 @@ inline u32 Nx2VsyncRateHz() {
                        : (std::max<u32>)(Settings::values.frame_rate_limit.GetValue(), 1);
 }
 
+/// The byte of a built-in patch's frame hold (Nx2::FrameHold), or nullopt without one.
+inline std::optional<u8> Nx2FrameHoldByte(Core::System& system) {
+    const u64 address = Nx2::GetFrameHold().address.load(std::memory_order_relaxed);
+    if (address == 0) {
+        return std::nullopt;
+    }
+    return system.ApplicationMemory().Read8(address);
+}
+
+/// Whether a built-in patch's frame hold holds the game at 60 fps now.
+inline bool Nx2FrameHeld(Core::System& system) {
+    const auto value = Nx2FrameHoldByte(system);
+    return value && *value != Nx2::GetFrameHold().free_value.load(std::memory_order_relaxed);
+}
+
 class INx2Vi2Session final : public ServiceFramework<INx2Vi2Session> {
 public:
     explicit INx2Vi2Session(Core::System& system_, std::shared_ptr<Nx2NativeObjects> objects_)
@@ -2017,8 +2033,9 @@ private:
             forced_fps_limit != 0 ? forced_fps_limit : Settings::values.fps_limit.GetValue();
         // With a frame rate limit other than 60 Hz the vsync event already paces the game; holding
         // its swap interval here as well kept it at 60 fps (interval 2 of a 120 Hz event). Only an
-        // explicit FPS limit still applies then.
-        const bool timer_paced = Nx2VsyncRateHz() != 60;
+        // explicit FPS limit still applies then. Ocarina of Time runs ahead of a slower vsync
+        // event, so a built-in frame hold paces its presents at 60 Hz here.
+        const bool timer_paced = Nx2VsyncRateHz() != 60 && !Nx2FrameHeld(system);
         const bool speed_limited = !timer_paced && Settings::values.use_speed_limit.GetValue() &&
                                    Settings::SpeedLimit() != 0;
         if (!speed_limited && fps_limit == 0) {
@@ -2519,6 +2536,26 @@ private:
         }
     }
 
+    struct VsyncState;
+
+    /// The vsync interval, or 60 Hz above 60 while a built-in patch's frame hold is on.
+    static std::chrono::nanoseconds HeldVblankInterval(Core::System& system,
+                                                       std::chrono::nanoseconds interval,
+                                                       VsyncState& state) {
+        constexpr std::chrono::nanoseconds Interval60Hz{1'000'000'000LL / 60};
+        const auto byte = Nx2FrameHoldByte(system);
+        if (!byte || interval >= Interval60Hz) {
+            return interval;
+        }
+        const u8 value = *byte;
+        const bool held = value != Nx2::GetFrameHold().free_value.load(std::memory_order_relaxed);
+        if (value != std::exchange(state.hold_value, value)) {
+            LOG_INFO(Service, "nx2:vi2 frame hold byte {} ({})", value,
+                     held ? "60 Hz" : "frame rate limit");
+        }
+        return held ? Interval60Hz : interval;
+    }
+
     void StartVsyncTimer() {
         if (!m_vsync_timer) {
             // The game starts frames on this event, so its rate is the frame rate limit.
@@ -2564,7 +2601,7 @@ private:
                             vsync_state->trace_min_gap.reset();
                         }
                     }
-                    return std::nullopt;
+                    return HeldVblankInterval(kernel.System(), VblankInterval, *vsync_state);
                 });
             system.CoreTiming().ScheduleLoopingEvent(VblankInterval, VblankInterval, m_vsync_timer);
         }
@@ -2583,6 +2620,7 @@ private:
         s64 trace_max_late{};
         u64 trace_callbacks{}, trace_late_callbacks{};
         std::atomic<u64> trace_present{};
+        u8 hold_value{}; ///< Last frame hold byte read (logged on change)
     };
     std::shared_ptr<VsyncState> m_vsync = std::make_shared<VsyncState>();
     std::shared_ptr<Core::Timing::EventType> m_vsync_timer;

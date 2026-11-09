@@ -25,6 +25,7 @@
 #include "core/hle/kernel/k_page_table.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/kernel/k_thread.h"
+#include "core/hle/service/nx2_frame_hold.h"
 #include "core/loader/nso.h"
 #include "core/memory.h"
 
@@ -179,6 +180,9 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
 
     // Apply patches if necessary
     const auto name = nso_file.GetName();
+    if (name == "main" && load_into_process) {
+        Service::Nx2::GetFrameHold().address.store(0);
+    }
     if (pm && (pm->HasNSOPatch(nso_header.build_id, name) || Settings::values.dump_nso)) {
         std::span<u8> patchable_section(codeset.memory.data() + module_start, codeset.memory.size() - module_start);
         std::vector<u8> pi_header(sizeof(NSOHeader) + patchable_section.size());
@@ -187,6 +191,13 @@ std::optional<VAddr> AppLoader_NSO::LoadModule(Kernel::KProcess& process, Core::
                     patchable_section.size());
 
         pi_header = pm->PatchNSO(pi_header, name);
+        if (const auto hold = pm->AppliedFrameHold(); hold && load_into_process) {
+            auto& frame_hold = Service::Nx2::GetFrameHold();
+            frame_hold.free_value.store(hold->free_value);
+            frame_hold.address.store(load_base + module_start + hold->module_offset);
+            LOG_INFO(Loader, "Frame hold at {}+{:#x}: 60 Hz while it is not {}", name,
+                     hold->module_offset, hold->free_value);
+        }
 
         std::copy(pi_header.begin() + sizeof(NSOHeader), pi_header.end(), patchable_section.data());
     }

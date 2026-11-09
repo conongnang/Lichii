@@ -44,7 +44,7 @@ constexpr size_t DynamicCallOffset = sizeof(Loader::NSOHeader) + 0x6E6CC4;
 constexpr size_t DynamicRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46200;
 constexpr size_t DynamicStateOffset = sizeof(Loader::NSOHeader) + 0x4E9FE00;
 constexpr size_t DynamicRoutineSize = 120;
-constexpr size_t UnlockRoutineSize = 172;
+constexpr size_t UnlockRoutineSize = 188;
 constexpr u32 DynamicCallInstruction = 0x94D57D4F;
 constexpr u32 DynamicOriginalInstruction = 0x1E201828;
 
@@ -272,12 +272,21 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
             fmt::format("IPS, replaced by {} when it applies", FpsUnlock));
     auto patched = manager.PatchNSO(nso, "main");
     REQUIRE(WordAt(patched, DynamicCallOffset) == DynamicCallInstruction);
+    // The unlock head's first-call cbz lands on the tail's first ret, 16 bytes further on.
+    std::string unlock_head{RoutineHead};
+    REQUIRE(unlock_head.find("CC0200B4") != std::string::npos);
+    unlock_head.replace(unlock_head.find("CC0200B4"), 8, "4C0300B4");
     REQUIRE(routine(patched, UnlockRoutineSize) ==
-            std::string{RoutineHead} + "0302001C0309231E4020231EEC00005402000014C0035FD6"
-                                       "6301001C0309231E4020231E8AFFFF540301001C4268231E"
-                                       "E300001C4278231E4840201EC0035FD60AD7833FEC51783F"
-                                       "0AD7A33C0000C040");
+            unlock_head + "8B9200B06BC17D397F050071C1000054"
+                          "0302001C0309231E4020231EEC00005402000014C0035FD6"
+                          "6301001C0309231E4020231E8AFFFF540301001C4268231E"
+                          "E300001C4278231E4840201EC0035FD60AD7833FEC51783F"
+                          "0AD7A33C0000C040");
     REQUIRE(WordAt(patched) == BranchInstruction);
+    const auto hold = manager.AppliedFrameHold();
+    REQUIRE(hold.has_value());
+    REQUIRE(hold->module_offset == 0x4E97F70);
+    REQUIRE(hold->free_value == 1);
 
     // Unchecking only Dynamic FPS keeps FPS Unlock.
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{DynamicFps}};
@@ -295,6 +304,7 @@ TEST_CASE("Built-in FPS Unlock defaults on and replaces Dynamic FPS", "[patch_ma
             std::string{RoutineHead} + "C300001C0309231E4020231E4D0000544840201EC0035FD6"
                                        "0AD7833F");
     REQUIRE(WordAt(patched, DynamicRoutineOffset + DynamicRoutineSize) == 0);
+    REQUIRE_FALSE(manager.AppliedFrameHold().has_value());
 
     // Both unchecked: hook and code cave stay untouched.
     Settings::values.disabled_addons[OcarinaTitleId] = {std::string{FpsUnlock},
