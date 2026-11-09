@@ -617,7 +617,7 @@ jobs:
             rows=$(cat)
             [[ -z "$rows" ]] && return 0
             if [[ -n "$has_pgo" ]]; then
-              printf '| Build Type | Standard | PGO (Recommended) | Notes |\n| --- | --- | --- | --- |\n'
+              printf '| Build Type | Standard | PGO | Notes |\n| --- | --- | --- | --- |\n'
             else
               printf '| Build Type | Standard | Notes |\n| --- | --- | --- |\n'
             fi
@@ -625,7 +625,7 @@ jobs:
           }
           pgo_note=""
           if [[ -n "$has_pgo" ]]; then
-            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Prefer them when your CPU supports it."
+            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Try both: some users report the standard (non-PGO) build runs better on their PC."
           fi
 
           cat > notes.md <<EOF
