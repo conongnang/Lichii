@@ -34,6 +34,9 @@ inline std::atomic<bool> g_mme_memo{Detail::EnvOn("EDEN_NX2_MME_MEMO")};
 /// Draws and clears follow the guest's render condition (occlusion query results). Off, every one
 /// runs, as if the condition always passed.
 inline std::atomic<bool> g_render_conditions{true};
+/// Samples-passed (occlusion) reports write the counted value. Off, each writes 0x100000, as if
+/// every queried object were visible.
+inline std::atomic<bool> g_occlusion_results{true};
 
 [[nodiscard]] inline bool GeometrySyncSkip() noexcept {
     return g_geometry_sync_skip.load(std::memory_order_relaxed);
@@ -47,6 +50,9 @@ inline std::atomic<bool> g_render_conditions{true};
 [[nodiscard]] inline bool RenderConditions() noexcept {
     return g_render_conditions.load(std::memory_order_relaxed);
 }
+[[nodiscard]] inline bool OcclusionResults() noexcept {
+    return g_occlusion_results.load(std::memory_order_relaxed);
+}
 
 struct Switch {
     std::string_view name;
@@ -54,7 +60,7 @@ struct Switch {
     std::string_view description;
 };
 
-[[nodiscard]] inline std::array<Switch, 5> Switches() {
+[[nodiscard]] inline std::array<Switch, 6> Switches() {
     return {{
         {"fast_draw", &Nx2FastDraw::g_enabled,
          "delta draws that keep the previous draw's pipeline, views and samplers (nx2_fast_draw.h)"},
@@ -64,6 +70,8 @@ struct Switch {
         {"mme_memo", &g_mme_memo, "replay the recorded effects of repeated macro calls"},
         {"render_conditions", &g_render_conditions,
          "skip draws and clears whose render condition (occlusion query result) fails"},
+        {"occlusion_results", &g_occlusion_results,
+         "report counted samples; off, every occlusion report says visible (0x100000)"},
     }};
 }
 

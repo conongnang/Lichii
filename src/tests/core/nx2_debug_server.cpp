@@ -462,7 +462,7 @@ TEST_CASE("Injected input merges buttons and replaces sticks while installed", "
 
 TEST_CASE("Debug switches flip live and report what they replaced", "[core][nx2_debug_server]") {
     const json initial = Core::Nx2Debug::SetSwitches(json::object());
-    REQUIRE(initial["switches"].size() == 5);
+    REQUIRE(initial["switches"].size() == 6);
     REQUIRE(initial["switches"]["geometry_sync_skip"] == true);
     REQUIRE(initial["previous"].empty());
 

@@ -1438,6 +1438,22 @@ void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
         if (Common::DkbFrameTrace::Enabled()) {
             ++trace_draws;
             ++trace_zero_direct;
+            const auto& regs = maxwell3d->regs;
+            const auto& draw_state = maxwell3d->draw_manager.draw_state;
+            const u64 vs = (u64{regs.pipelines[1].reserved[0] & 0xff} << 32) |
+                           regs.pipelines[1].reserved[1];
+            const u64 ps = (u64{regs.pipelines[5].reserved[0] & 0xff} << 32) |
+                           regs.pipelines[5].reserved[1];
+            static std::set<std::tuple<u64, u64, u32, u32>> seen_zero;
+            const u32 count = is_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count;
+            if (seen_zero.size() < 256 && seen_zero.emplace(vs, ps, count == 0, instance_count == 0).second) {
+                LOG_INFO(Render_Vulkan,
+                         "Zero draw skipped: vs={:#x} ps={:#x} indexed={} count={} instances={} "
+                         "first={} base_vertex={} rt0={:#x}",
+                         vs, ps, is_indexed, count, instance_count,
+                         is_indexed ? draw_state.index_buffer.first : draw_state.vertex_buffer.first,
+                         draw_state.base_index, regs.rt[0].Address());
+            }
         }
         gpu.TickWork();
         return;

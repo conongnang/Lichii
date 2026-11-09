@@ -140,7 +140,7 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 | `pause`, `resume`, `step_frames` | Not possible | Freeze on the broken frame, capture it, step one present | 2 |
 | `input`, `input_sequence` (buttons, sticks, frame-timed sequences) | Owner plays to the spot | Agent walks to the spot itself and replays a repro (done) | 2 |
 | `shaders` (inventory) | Shader dump and offline sweep | List loaded programs: key, hash, stage, address, lowered or rejected with the error | 2 |
-| `switches` (live `EDEN_NX2_*`) | Relaunch per switch | Toggle GPU shortcuts live: fast_draw, geometry_sync_skip, ubo_reuse, mme_memo, render_conditions (done) | 2 |
+| `switches` (live `EDEN_NX2_*`) | Relaunch per switch | Toggle GPU shortcuts live: fast_draw, geometry_sync_skip, ubo_reuse, mme_memo, render_conditions, occlusion_results (done) | 2 |
 | `read_memory`, `search_memory`, `read_gpu_memory` | GDB stub session or log prints plus a rebuild | Read a range by address, find known values in the heap (done) | 3 |
 | `dump_texture`, `dump_buffer` | Frame dump of the whole frame | One resource by GPU address, as PNG plus raw | 3 |
 | `gpu_timings` | `EDEN_NX2_GPU_PROFILE` relaunch, zones only | Per-pass GPU time of one frame | 3 |
@@ -226,6 +226,7 @@ bug that only shows after a long session can be A/B tested on that session:
 | `ubo_reuse` | Rebinding the stream copy of unchanged small uniform buffers (`EDEN_NX2_UBOREUSE` sets the start value) |
 | `mme_memo` | Replaying repeated macro calls (`EDEN_NX2_MME_MEMO` sets the start value) |
 | `render_conditions` | Render conditions: every draw and clear runs as if its occlusion-query condition passed, on the host conditional rendering path and the CPU one |
+| `occlusion_results` | Counted samples in occlusion reports: each ZPassPixelCount report writes 0x100000 ("visible") |
 
 Restore every switch you change before you finish.
 

@@ -238,6 +238,12 @@ void QueryCacheBase<Traits>::CounterReport(GPUVAddr addr, QueryType counter_type
     const bool has_timestamp = True(flags & QueryPropertiesFlags::HasTimeout);
     const bool is_fence = True(flags & QueryPropertiesFlags::IsAFence);
     const auto requested_type = counter_type;
+    // The debug server's occlusion_results switch: every samples report says "visible".
+    if (!Nx2Live::OcclusionResults() && (counter_type == QueryType::ZPassPixelCount ||
+                                         counter_type == QueryType::ZPassPixelCount64)) {
+        counter_type = QueryType::Payload;
+        payload = 0x100000;
+    }
     static const GPUVAddr watch = [] {
         const char* value = std::getenv("EDEN_NX2_SEM_WATCH");
         return value ? GPUVAddr{std::strtoull(value, nullptr, 16)} : GPUVAddr{};
