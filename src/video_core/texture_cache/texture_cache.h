@@ -220,7 +220,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         }
         const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
         if ((!aggressive_mode && !evict_old_costly && True(image.flags & ImageFlagBits::CostlyLoad)) ||
-            (!high_priority_mode && must_download)) {
+            // An image the GPU wrote waits for the GPU to copy it back first (a hitch each, while
+            // turning the camera in Ocarina): only past the critical threshold.
+            (!aggressive_mode && !out_of_memory && must_download)) {
             return false;
         }
         if (must_download) {
@@ -297,6 +299,13 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
                     fill = it != block_image_bytes.end()
                                ? static_cast<double>(it->second) / static_cast<double>(block.block_size)
                                : 0.0;
+                }
+                // An image the GPU wrote is copied back before it goes, and waits for the GPU
+                // (Ocarina, turning the camera: 304 of 408 deleted in 40 waits, each a hitch).
+                // Those go after the ones that can simply be dropped.
+                const Image& image = slot_images[image_id];
+                if (IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap)) {
+                    fill += 2.0;
                 }
                 ordered.emplace_back(fill, image_id);
             }
