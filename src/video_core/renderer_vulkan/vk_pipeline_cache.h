@@ -305,6 +305,9 @@ private:
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
 
+    /// Requested first when the cache is destroyed, to stop a rewrite of the disk cache: Android
+    /// and yuzu_cmd load with a stop token that never stops
+    std::stop_source serialization_stop;
     Common::ThreadWorker workers;
     /// Software HMMA compute pipelines on drivers that take minutes on them
     /// (Device::DefersSoftwareMatrixPipelines); nothing waits for this worker.
