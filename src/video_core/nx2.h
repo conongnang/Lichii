@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -148,6 +149,18 @@ inline void Nx2ClearGpuWrittenPages() {
         return false;
     }
     return (g_nx2_gpu_written_pages[page / 64].load(std::memory_order_relaxed) >> (page % 64)) & 1;
+}
+
+/// EDEN_NX2_GUEST_FAST (from Frizti's Fritchii, EXP35): guest reads and writes of cached memory
+/// skip the cache mutexes the split's back holds through each draw. 1 = reads of pages without
+/// images or GPU writes are answered without them, writes to never-GPU-written pages are collected
+/// for the back's next FlushCaching instead of OnCPUWrite; 2 = writes to any page are collected.
+[[nodiscard]] inline int Nx2GuestFastMode() {
+    static const int mode = [] {
+        const char* value = std::getenv("EDEN_NX2_GUEST_FAST");
+        return value != nullptr ? std::atoi(value) : 0;
+    }();
+    return mode;
 }
 
 /// False only when no page of [device_address, device_address + size) has been GPU-written.

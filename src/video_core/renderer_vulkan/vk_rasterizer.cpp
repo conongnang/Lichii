@@ -2421,6 +2421,21 @@ bool RasterizerVulkan::HasCachedQueries(DAddr addr, u64 size) {
 }
 
 VideoCore::RasterizerDownloadArea RasterizerVulkan::GetFlushArea(DAddr addr, u64 size) {
+    // EDEN_NX2_GUEST_FAST (Fritchii): pages no image was ever registered on and no GPU write ever
+    // marked (bits that never clear) need no look under the mutexes the split's back holds
+    // through each draw; the locked path would answer this same preemptive area.
+    if (Tegra::Nx2GuestFastMode() != 0 && Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+        const DAddr page_begin = Common::AlignDown(addr, Core::DEVICE_PAGESIZE);
+        const DAddr page_end = Common::AlignUp(addr + size, Core::DEVICE_PAGESIZE);
+        if (!texture_cache.page_filter.Any(addr, size) &&
+            !Tegra::Nx2MayBeGpuWritten(page_begin, page_end - page_begin)) {
+            return VideoCore::RasterizerDownloadArea{
+                .start_address = page_begin,
+                .end_address = page_end,
+                .preemtive = true,
+            };
+        }
+    }
     std::optional<VideoCore::RasterizerDownloadArea> texture_area;
     {
         std::scoped_lock lock{texture_cache.mutex};
