@@ -540,6 +540,42 @@ json ReadMemory(ToolState& state, const json& params) {
     return result;
 }
 
+/// Writes guest memory to <dump dir>/<name>.bin in one call, unmapped pages as zeros, so state
+/// can be diffed across a few seconds of play (read_memory takes 64 KiB a call).
+json DumpMemory(ToolState& state, const json& params) {
+    const u64 address = AddressParam(params, "address");
+    const u64 size = params.at("size").get<u64>();
+    if (size == 0 || size > 256 * 1024 * 1024 || address + size < address) {
+        throw std::runtime_error{"size must be 1 byte to 256 MiB"};
+    }
+    const std::string name = params.at("name").get<std::string>();
+    if (name.empty() || name.find_first_of("/\:.") != std::string::npos) {
+        throw std::runtime_error{"name: want a plain file name without extension"};
+    }
+    std::vector<u8> bytes(size);
+    u64 unmapped = 0;
+    auto& memory = Application(state).GetMemory();
+    for (u64 offset = 0; offset < size;) {
+        const u64 current = address + offset;
+        const u64 length = (std::min)(Memory::YUZU_PAGESIZE - (current & Memory::YUZU_PAGEMASK),
+                                      size - offset);
+        if (ReadGuestMemory(memory, current, std::span<u8>{bytes.data() + offset, length})) {
+            std::fill_n(bytes.data() + offset, length, u8{0});
+            unmapped += length;
+        }
+        offset += length;
+    }
+    std::filesystem::create_directories(state.dump_directory);
+    const auto path = state.dump_directory / (name + ".bin");
+    std::ofstream file{path, std::ios::binary};
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(size));
+    if (!file) {
+        throw std::runtime_error{fmt::format("could not write {}", path.generic_string())};
+    }
+    return {{"path", path.generic_string()}, {"address", HexAddress(address)}, {"size", size},
+            {"unmapped_bytes", unmapped}};
+}
+
 json SearchMemory(ToolState& state, const json& params) {
     const std::vector<u8> pattern = ParseHexBytes(params.at("pattern").get<std::string>());
     if (pattern.size() > 256) {
@@ -722,6 +758,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"speed_limit", handler(SpeedLimit)},
         {"read_memory", handler(ReadMemory)},
         {"search_memory", handler(SearchMemory)},
+        {"dump_memory", handler(DumpMemory)},
         {"read_gpu_memory", handler(ReadGpuMemory)},
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},

@@ -189,6 +189,20 @@ TOOLS = [
         },
     },
     {
+        "name": "dump_memory",
+        "description": "Writes up to 256 MiB of guest virtual memory to <dump dir>/<name>.bin in "
+                       "one call (unmapped pages as zeros), to diff game state across moments.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "address": {"type": ["string", "integer"]},
+                "size": {"type": "integer", "minimum": 1, "maximum": 268435456},
+                "name": {"type": "string"},
+            },
+            "required": ["address", "size", "name"],
+        },
+    },
+    {
         "name": "read_gpu_memory",
         "description": "Reads up to 64 KiB of GPU virtual memory (e.g. query report and semaphore "
                        "buffers the game reads back) at the next frame end, as the GPU sees it, "
