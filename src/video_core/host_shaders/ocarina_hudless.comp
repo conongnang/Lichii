@@ -1,0 +1,37 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// AMD frame generation tells the HUD apart by comparing the presented frame with the same frame
+// without its HUD. Ocarina of Time draws its HUD in the same pass that writes the presented image,
+// so that frame is made here: where the presented image differs clearly from the game's scene (the
+// HUD), the scene; everywhere else the presented image itself, bit for bit, so the rest matches.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D scene;     // the scene the final pass reads (linear)
+layout(binding = 1) uniform sampler2D presented; // the presented image, raw sRGB bytes
+layout(binding = 2, rgba8) uniform writeonly image2D hudless;
+layout(push_constant) uniform Controls {
+    float threshold; // largest sRGB difference still taken as the same scene
+} controls;
+
+vec3 encode_srgb(vec3 linear) {
+    linear = clamp(linear, 0.0, 1.0);
+    return mix(1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055,
+               12.92 * linear, lessThan(linear, vec3(0.0031308)));
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = imageSize(hudless);
+    if (any(greaterThanEqual(pixel, extent))) {
+        return;
+    }
+    vec4 raw = texelFetch(presented, pixel, 0);
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(extent);
+    vec3 scene_srgb = encode_srgb(textureLod(scene, uv, 0.0).rgb);
+    vec3 difference = abs(raw.rgb - scene_srgb);
+    bool hud = max(max(difference.r, difference.g), difference.b) > controls.threshold;
+    imageStore(hudless, pixel, hud ? vec4(scene_srgb, raw.a) : raw);
+}

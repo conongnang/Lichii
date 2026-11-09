@@ -25,6 +25,7 @@ layout(std140, binding = 2, row_major) uniform Transforms {
     vec4 current_origin;
     vec4 previous_origin;
     vec2 extent;
+    uvec4 counts; // weights used from the first group and from the second; z: a solid object
 } transforms;
 
 void blend_joint(vec4 local, uint joint, float weight, inout vec3 current, inout vec3 previous) {
@@ -39,11 +40,16 @@ void main() {
     vec4 local = vec4(position, 1);
     vec3 current = vec3(0);
     vec3 previous = vec3(0);
-    for (int i = 0; i < weights.length(); ++i) {
+    if (transforms.counts.z != 0) {
+        // A solid object: its transform is the only bone.
+        current = current_pose.bones[0] * local;
+        previous = previous_pose.bones[0] * local;
+    }
+    for (int i = 0; i < int(transforms.counts.x); ++i) {
         blend_joint(local, joints[i], weights[i], current, previous);
     }
 #ifdef OCARINA_EIGHT_WEIGHTS
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < int(transforms.counts.y); ++i) {
         blend_joint(local, extra_joints[i], extra_weights[i], current, previous);
     }
 #endif

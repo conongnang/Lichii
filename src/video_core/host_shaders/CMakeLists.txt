@@ -109,6 +109,11 @@ set(SHADER_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_output.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_4k_composite.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_dlss_4k_reference.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_hudless.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_hud_mask.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_hud_mask_4k.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_hud_motion.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ocarina_hud_depth.comp
 )
 
 if (HAIKUOS)

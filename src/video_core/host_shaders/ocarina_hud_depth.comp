@@ -1,0 +1,37 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// AMD frame generation builds a coarser motion field and keeps, at each place, the motion of
+// what is nearest the camera. The HUD has the scene's depth, so the scene's motion won over the
+// HUD's (none) on its thin parts and the hearts and icons moved with the camera. Its depth copy
+// puts the HUD (the last frame's mask, widened like its motion) nearest instead.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D scene_depth;
+layout(binding = 1) uniform sampler2D hud_mask;
+layout(binding = 2, r32f) uniform writeonly image2D frame_gen_depth;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 extent = imageSize(frame_gen_depth);
+    if (any(greaterThanEqual(pixel, extent))) {
+        return;
+    }
+    ivec2 mask_size = textureSize(hud_mask, 0);
+    vec2 mask_scale = vec2(mask_size) / vec2(extent);
+    float hud = 0.0;
+    for (int y = -4; y <= 4; ++y) {
+        for (int x = -4; x <= 4; ++x) {
+            ivec2 at = clamp(pixel + ivec2(x, y), ivec2(0), extent - 1);
+            // The mask is at the output size; the scene can be smaller (the game's dynamic
+            // resolution, e.g. 1440x810 upscaled to 1080p): take the mask pixel at the same place.
+            ivec2 mask_at = clamp(ivec2((vec2(at) + 0.5) * mask_scale), ivec2(0), mask_size - 1);
+            hud = max(hud, texelFetch(hud_mask, mask_at, 0).r);
+        }
+    }
+    // Depth grows with distance here (not inverted): 0 is the near plane.
+    float depth = hud > 0.5 ? 0.0 : texelFetch(scene_depth, pixel, 0).r;
+    imageStore(frame_gen_depth, pixel, vec4(depth));
+}

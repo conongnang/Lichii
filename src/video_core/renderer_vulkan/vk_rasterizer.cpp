@@ -20,11 +20,16 @@
 #include <span>
 #include <fstream>
 #include <mutex>
+#include <cstring>
+#include <map>
+#include <unordered_map>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
 
+#include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
 #include "common/assert.h"
@@ -48,6 +53,7 @@
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/framebuffer_clear_layers.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
+#include "video_core/renderer_vulkan/vk_amd_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_ocarina_camera_motion.h"
 #ifdef EGLANTINE_STREAMLINE
 #include "video_core/renderer_vulkan/vk_streamline_dlss.h"
@@ -1148,8 +1154,52 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
     constexpr u64 final_vertex = 0x16aff33d999f993fULL;
     constexpr u64 final_fragment = 0x52402d8e8ab55263ULL;
     const auto hashes = pipeline->ShaderHashes();
-    if (oot_4k_scene_frame == render_trace_frame && hashes[5] == final_fragment &&
-        std::ranges::find(hashes, final_vertex) != hashes.end()) {
+    const bool final_pass = hashes[5] == final_fragment &&
+                            std::ranges::find(hashes, final_vertex) != hashes.end();
+    if (final_pass && AmdFrameGen::Requested() && OcarinaDlssEnabled()) {
+        // The HUD is now drawn into FSR 4's output, which the final pass reads.
+        // On unless EDEN_NX2_AMD_FG_HUD_MASK=0.
+        static const bool hud_mask = [] {
+            const char* const value = std::getenv("EDEN_NX2_AMD_FG_HUD_MASK");
+            return !value || value[0] != '0';
+        }();
+        // Built here, where FSR 4's output holds the scene and its HUD, with the view the HUD
+        // draws had bound. (Built with the next frame's FSR 4 instead, the image no longer held
+        // this frame: the mask covered everything and the world stopped moving in generated frames.)
+        if (hud_mask && oot_pre_hud_frame == render_trace_frame &&
+            oot_hud_frame == render_trace_frame && oot_hud_view && oot_live_dlss) {
+            oot_live_dlss->MakeHudMask(*oot_pre_hud_view, oot_hud_view, oot_pre_hud_extent);
+        }
+        oot_hud_frame.reset();
+        oot_hud_view = VK_NULL_HANDLE;
+        static const bool hudless = [] {
+            const char* const value = std::getenv("EDEN_NX2_AMD_FG_HUDLESS");
+            return value && value[0] == '1';
+        }();
+        if (hudless) {
+            SaveOcarinaHudless();
+        }
+    } else if (oot_pre_hud_frame == render_trace_frame && !final_pass) {
+        // A HUD draw into FSR 4's output: keep the view it has bound for the mask.
+        const auto target_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
+        if (target_id) {
+            auto& view = texture_cache.GetImageView(target_id);
+            if (view.ImageHandle() == oot_scene_image && !view.IsRescaled() &&
+                view.size.width == oot_pre_hud_extent.width &&
+                view.size.height == oot_pre_hud_extent.height) {
+                oot_hud_view = view.Handle(Shader::TextureType::Color2D);
+                oot_hud_frame = render_trace_frame;
+            }
+        }
+    } else if (oot_hudless_frame == render_trace_frame) {
+        // Diagnostic: draws into the presented image after the copy (the HUD).
+        const auto target_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
+        if (target_id &&
+            texture_cache.GetImageView(target_id).ImageHandle() == oot_hudless_source) {
+            ++oot_draws_after_hudless;
+        }
+    }
+    if (oot_4k_scene_frame == render_trace_frame && final_pass) {
         const auto target_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
         if (target_id) {
             const auto& target = texture_cache.GetImageView(target_id);
@@ -2851,11 +2901,49 @@ void RasterizerVulkan::TracePendingCpuWrites(bool compute, std::span<const u64> 
     });
 }
 
+// Outside EGLANTINE_STREAMLINE: Linux and macOS builds call it too.
+std::pair<const char*, const char*> RasterizerVulkan::AmdFrameGenIdleReason() const {
+#ifndef _WIN32
+    return {"WINDOWS ONLY", "AMD frame generation runs on Windows only. On Linux and macOS, pick "
+                            "another Frame Generation Type."};
+#else
+    if (!AmdFrameGen::SwapchainActive()) {
+        return {"RESTART", "AMD frame generation starts with Lichii: close and reopen Lichii after "
+                           "changing the Frame Generation Type. If it still shows this, AMD's "
+                           "swapchain couldn't start (see the log)."};
+    }
+#ifdef EGLANTINE_STREAMLINE
+    constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
+    if (program_id != ocarina_program) {
+        return {"OOT ONLY", "AMD frame generation works in The Legend of Zelda: Ocarina of Time "
+                            "only."};
+    }
+    if (Settings::values.resolution_setup.GetValue() != Settings::ResolutionSetup::Res1X) {
+        return {"RES 1X", "Set Resolution to 1X: AMD frame generation and FSR only run at the "
+                          "game's own resolution."};
+    }
+    if (!OcarinaDlssEnabled()) {
+        return {"NO FSR", "Ocarina's AMD FSR path couldn't start, and frame generation takes its "
+                          "motion from it. See the log for \"AMD FSR\"."};
+    }
+    const char* const reason = oot_idle_reason.load(std::memory_order_relaxed);
+    if (reason != nullptr && std::string_view{reason} == "unexpected upscale images") {
+        return {"RES 1X", "The game's images aren't at its own resolution: set Resolution to 1X."};
+    }
+    return {"WAITING", "Waiting for gameplay: menus, cutscenes and loading screens have no motion "
+                       "data to generate frames from."};
+#else
+    return {"UNAVAILABLE", "This build has no Ocarina motion data for AMD frame generation."};
+#endif
+#endif
+}
+
 #ifdef EGLANTINE_STREAMLINE
 bool RasterizerVulkan::OcarinaDlssEnabled() const {
     constexpr u64 ocarina_program = 0x0400486024DEC000ULL;
     return program_id == ocarina_program && !oot_live_failed &&
-           Settings::values.nvidia_dlss.GetValue() && Streamline::IsDlssAvailable();
+           ((Settings::values.nvidia_dlss.GetValue() && Streamline::IsDlssAvailable()) ||
+            Fsr4Upscaler::IsAvailable(device));
 }
 
 /// Capture the two camera matrices from a draw targeting the scene color and depth. Terrain and
@@ -2898,6 +2986,22 @@ void RasterizerVulkan::TrackOcarinaCamera() {
             camera[projection_wz] != -1.0f || camera[projection_wz + 1] != 0.0f) {
             return;
         }
+        // Below full speed the game lowers its resolution and draws the scene into a corner of
+        // the target, which its own upscaler stretches: FSR 4 here took the whole target as the
+        // scene (a corner of picture and garbage), so those frames go back to the game's upscaler.
+        const auto& viewport = maxwell3d->regs.viewport_transform[0];
+        const u32 drawn_width = static_cast<u32>(std::abs(viewport.scale_x) * 2.0f + 0.5f);
+        const u32 drawn_height = static_cast<u32>(std::abs(viewport.scale_y) * 2.0f + 0.5f);
+        if (drawn_width + 2 < color.size.width || drawn_height + 2 < color.size.height) {
+            static u32 logged = 0;
+            if (logged++ % 300 == 0) {
+                LOG_INFO(Render_Vulkan,
+                         "Ocarina of Time: dynamic resolution, scene drawn at {}x{} of {}x{}: "
+                         "the game's upscaler runs",
+                         drawn_width, drawn_height, color.size.width, color.size.height);
+            }
+            return;
+        }
         const std::span values{camera};
         oot_camera_sample_frame = render_trace_frame;
         oot_motion.camera_channel = gpu_memory;
@@ -2907,37 +3011,162 @@ void RasterizerVulkan::TrackOcarinaCamera() {
     });
 }
 
-/// Capture the skinning pose of the recognized Link draw for frame-to-frame motion.
-void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect) {
-    if (shader_hash != 0x28c6e527634f814aULL || !is_indexed || is_indirect ||
-        !OcarinaDlssEnabled() || oot_actor.frame == render_trace_frame) {
+/// Capture a solid object's transform (constant buffer 4: a 3x4 matrix, then an origin at 0x40).
+void RasterizerVulkan::TrackOcarinaRigid(const OcarinaVertexLayout& position_layout) {
+    // EDEN_NX2_OOT_OBJECT_MOTION=1: off by default. Large objects whose transform the game writes
+    // every frame got motion as if they moved, and generated frames dragged patches of them
+    // across the sky; breaking rocks, cut grass and splashes are particles it can't see anyway.
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_OOT_OBJECT_MOTION");
+        return value && value[0] == '1';
+    }();
+    if (!enabled || oot_rigid.size() >= MaxOcarinaRigid ||
+        (position_layout.position != VK_FORMAT_R32G32B32_SFLOAT &&
+         position_layout.position != VK_FORMAT_R16G16B16A16_SFLOAT)) {
         return;
     }
     const auto& draw = maxwell3d->draw_manager.draw_state;
     const auto& regs = maxwell3d->regs;
-    const auto& stream = regs.vertex_streams[0];
-    if (draw.index_buffer.count != 9702 || draw.index_buffer.FormatSizeInBytes() != 2 ||
-        !stream.IsEnabled() || stream.stride != 48 || regs.vertex_stream_instances.IsInstancingEnabled(0)) {
-        return;
-    }
-    const auto attribute = [&](u32 location, VkFormat format, u32 offset) {
-        const auto& attrib = regs.vertex_attrib_format[location];
-        return attrib.buffer == 0 && !attrib.constant && attrib.offset == offset &&
-            MaxwellToVK::VertexFormat(device, attrib.type, attrib.size) == format;
-    };
-    if (!attribute(0, VK_FORMAT_R32G32B32_SFLOAT, 0) ||
-        !attribute(4, VK_FORMAT_R8G8B8A8_UNORM, 40) || !attribute(5, VK_FORMAT_R8G8B8A8_UNORM, 44) ||
-        !attribute(6, VK_FORMAT_R16G16B16A16_UINT, 12) || !attribute(7, VK_FORMAT_R16G16B16A16_UINT, 20)) {
-        return;
-    }
-
     OcarinaActorPose pose{
-        .frame = render_trace_frame,
+        .channel = gpu_memory,
+        .vertex = regs.vertex_streams[0].Address(),
+        .indices = draw.index_buffer.IndexStart(),
+        .base_vertex = static_cast<s32>(draw.base_index),
+        .index_count = draw.index_buffer.count,
+    };
+    // Bone 0 and the origin; the attributes the overlay needs besides the position read it again.
+    pose.layout = position_layout;
+    pose.layout.rigid = 1;
+    pose.layout.weights = pose.layout.extra_weights = VK_FORMAT_R8G8B8A8_UNORM;
+    pose.layout.joints = pose.layout.extra_joints = VK_FORMAT_R8G8B8A8_UINT;
+    pose.layout.weights_offset = pose.layout.extra_weights_offset = pose.layout.position_offset;
+    pose.layout.joints_offset = pose.layout.extra_joints_offset = pose.layout.position_offset;
+    pose.layout.weight_count = pose.layout.extra_count = 0;
+    bool found = false;
+    buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
+                                                const auto& binding, u32 size, const auto*, u32) {
+        if (stage != 0 || storage || index != 4 || size < 0x4C ||
+            buffer_cache.IsRegionGpuModified(binding.device_addr, size)) {
+            return;
+        }
+        device_memory.ReadBlockUnsafe(binding.device_addr, pose.bones.data(), 12 * sizeof(f32));
+        device_memory.ReadBlockUnsafe(binding.device_addr + 0x40, pose.origin.data(),
+                                      3 * sizeof(f32));
+        found = true;
+    });
+    if (found) {
+        oot_rigid.push_back(pose);
+    }
+}
+
+/// Capture the skinning pose of a character draw for frame-to-frame motion: any draw with the
+/// skinned layout Link is drawn with (position, eight joint indices and weights in 48 bytes) and
+/// a pose buffer, so other characters move in the motion as well.
+void RasterizerVulkan::TrackOcarinaActor(u64, bool is_indexed, bool is_indirect) {
+    if (!is_indexed || is_indirect || !OcarinaDlssEnabled()) {
+        return;
+    }
+    if (oot_actors_frame != render_trace_frame) {
+        oot_previous_rigid.clear();
+        if (oot_actors_frame + 1 == render_trace_frame) {
+            oot_previous_actors = std::move(oot_actors);
+            for (auto& pose : oot_rigid) {
+                oot_previous_rigid[pose.vertex ^ (pose.indices << 1) ^
+                                   (u64{pose.index_count} << 40) ^
+                                   static_cast<u64>(static_cast<u32>(pose.base_vertex))]
+                    .push_back(pose);
+            }
+        } else {
+            oot_previous_actors.clear();
+        }
+        oot_actors.clear();
+        oot_rigid.clear();
+        oot_actors_frame = render_trace_frame;
+    }
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const auto& regs = maxwell3d->regs;
+    const auto& stream = regs.vertex_streams[0];
+    const u32 index_count = draw.index_buffer.count;
+    if (index_count < 3 || index_count % 3 != 0 || index_count > 196608 ||
+        draw.index_buffer.FormatSizeInBytes() != 2 || !stream.IsEnabled() || stream.stride < 12 ||
+        stream.stride > 128 || regs.vertex_stream_instances.IsInstancingEnabled(0)) {
+        return;
+    }
+    // The skinned layouts the game draws characters with: a float position at location 0, joint
+    // weights (8-bit unorm) at 4 and 5 and their joint indices (8- or 16-bit uint) at 6 and 7.
+    const auto read_attribute = [&](u32 location, VkFormat& format, u32& offset) {
+        const auto& attrib = regs.vertex_attrib_format[location];
+        if (attrib.buffer != 0 || attrib.constant) {
+            return false;
+        }
+        format = MaxwellToVK::VertexFormat(device, attrib.type, attrib.size);
+        offset = attrib.offset;
+        return format != VK_FORMAT_UNDEFINED && offset < stream.stride;
+    };
+    const auto components = [](VkFormat format) -> u32 {
+        switch (format) {
+        case VK_FORMAT_R8_UNORM:
+        case VK_FORMAT_R8_UINT:
+        case VK_FORMAT_R16_UINT:
+            return 1;
+        case VK_FORMAT_R8G8_UNORM:
+        case VK_FORMAT_R8G8_UINT:
+        case VK_FORMAT_R16G16_UINT:
+            return 2;
+        case VK_FORMAT_R8G8B8A8_UNORM:
+        case VK_FORMAT_R8G8B8A8_UINT:
+        case VK_FORMAT_R16G16B16A16_UINT:
+            return 4;
+        default:
+            return 0;
+        }
+    };
+    const auto is_weight = [](VkFormat f) {
+        return f == VK_FORMAT_R8_UNORM || f == VK_FORMAT_R8G8_UNORM || f == VK_FORMAT_R8G8B8A8_UNORM;
+    };
+    const auto is_joint = [](VkFormat f) {
+        return f == VK_FORMAT_R8_UINT || f == VK_FORMAT_R8G8_UINT || f == VK_FORMAT_R8G8B8A8_UINT ||
+               f == VK_FORMAT_R16_UINT || f == VK_FORMAT_R16G16_UINT ||
+               f == VK_FORMAT_R16G16B16A16_UINT;
+    };
+    OcarinaVertexLayout layout{.stride = stream.stride};
+    if (!read_attribute(0, layout.position, layout.position_offset) ||
+        (layout.position != VK_FORMAT_R32G32B32_SFLOAT &&
+         layout.position != VK_FORMAT_R16G16B16A16_SFLOAT) ||
+        !read_attribute(4, layout.weights, layout.weights_offset) || !is_weight(layout.weights) ||
+        !read_attribute(6, layout.joints, layout.joints_offset) || !is_joint(layout.joints)) {
+        TrackOcarinaRigid(layout);
+        return;
+    }
+    layout.weight_count = (std::min)(components(layout.weights), components(layout.joints));
+    if (read_attribute(5, layout.extra_weights, layout.extra_weights_offset) &&
+        is_weight(layout.extra_weights) &&
+        read_attribute(7, layout.extra_joints, layout.extra_joints_offset) &&
+        is_joint(layout.extra_joints)) {
+        layout.extra_count =
+            (std::min)(components(layout.extra_weights), components(layout.extra_joints));
+    } else {
+        layout.extra_weights = layout.weights;
+        layout.extra_weights_offset = layout.weights_offset;
+        layout.extra_joints = layout.joints;
+        layout.extra_joints_offset = layout.joints_offset;
+        layout.extra_count = 0;
+    }
+    if (oot_actors.size() >= MaxOcarinaActors) {
+        return;
+    }
+    OcarinaActorPose pose{
+        .layout = layout,
         .channel = gpu_memory,
         .vertex = stream.Address(),
         .indices = draw.index_buffer.IndexStart(),
         .base_vertex = static_cast<s32>(draw.base_index),
+        .index_count = index_count,
     };
+    // The same mesh drawn twice in a frame (a shadow pass) keeps its first pose.
+    if (std::ranges::any_of(oot_actors, [&](const auto& actor) { return actor.SameMesh(pose); })) {
+        return;
+    }
     bool origin_found{}, bones_found{};
     buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
                                                 const auto& binding, u32 size, const auto*, u32) {
@@ -2946,27 +3175,140 @@ void RasterizerVulkan::TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool 
             return;
         }
         if (index == 4 && size >= 0x40 + 3 * sizeof(f32)) {
-            device_memory.ReadBlockUnsafe(binding.device_addr + 0x40, pose.origin.data(), 3 * sizeof(f32));
+            device_memory.ReadBlockUnsafe(binding.device_addr + 0x40, pose.origin.data(),
+                                          3 * sizeof(f32));
             origin_found = true;
         }
-        if (index == 6 && size == 13568) {
-            device_memory.ReadBlockUnsafe(binding.device_addr, pose.bones.data(), sizeof(pose.bones));
+        if (index == 6 && size >= 12 * sizeof(f32)) {
+            const size_t bytes = (std::min<size_t>)(size, sizeof(pose.bones)) / 48 * 48;
+            device_memory.ReadBlockUnsafe(binding.device_addr, pose.bones.data(), bytes);
             bones_found = true;
         }
     });
     if (origin_found && bones_found) {
-        oot_previous_actor = oot_actor;
-        oot_actor = pose;
+        oot_actors.push_back(pose);
     }
 }
 
-/// Read the shared mesh only when both poses refer to the same vertex and index buffers.
-void RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
-    const auto& now = oot_actor;
-    const auto& before = oot_previous_actor;
-    if (now.frame != render_trace_frame || before.frame + 1 != now.frame ||
-        now.channel != gpu_memory || before.channel != now.channel || now.vertex != before.vertex ||
-        now.indices != before.indices || now.base_vertex != before.base_vertex) {
+/// Diagnostic: draws that look skinned (an integer vertex attribute, as joint indices are, and a
+/// constant buffer 6 like Link's pose) but have another layout than Link's, once per layout.
+void RasterizerVulkan::LogOcarinaSkinnedLayout() {
+    static std::set<std::string> seen;
+    if (seen.size() >= 24) {
+        return;
+    }
+    const auto& regs = maxwell3d->regs;
+    bool integer_attribute = false;
+    std::string layout;
+    for (u32 location = 0; location < 16; ++location) {
+        const auto& attrib = regs.vertex_attrib_format[location];
+        if (attrib.constant) {
+            continue;
+        }
+        const VkFormat format = MaxwellToVK::VertexFormat(device, attrib.type, attrib.size);
+        if (format == VK_FORMAT_UNDEFINED) {
+            continue;
+        }
+        const bool is_uint = format == VK_FORMAT_R8G8B8A8_UINT || format == VK_FORMAT_R16G16B16A16_UINT ||
+                             format == VK_FORMAT_R8G8B8A8_SINT || format == VK_FORMAT_R16G16_UINT ||
+                             format == VK_FORMAT_R8G8_UINT || format == VK_FORMAT_R32_UINT ||
+                             format == VK_FORMAT_R8G8B8A8_USCALED || format == VK_FORMAT_R16G16B16A16_USCALED;
+        integer_attribute |= is_uint;
+        layout += fmt::format(" a{}:b{}+{}:{}", location, attrib.buffer.Value(), attrib.offset.Value(),
+                              static_cast<int>(format));
+    }
+    u32 pose_size = 0;
+    buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
+                                                const auto&, u32 size, const auto*, u32) {
+        if (stage == 0 && !storage && index == 6) {
+            pose_size = size;
+        }
+    });
+    if (!integer_attribute || pose_size < 48) {
+        return;
+    }
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const std::string key = fmt::format("stride {} index {}B pose {}B{}", regs.vertex_streams[0].stride,
+                                        draw.index_buffer.FormatSizeInBytes(), pose_size, layout);
+    if (seen.insert(key).second) {
+        LOG_INFO(Render_Vulkan, "Ocarina skinned draw not tracked: {} indices {} instanced {}", key,
+                 draw.index_buffer.count, regs.vertex_stream_instances.IsInstancingEnabled(0));
+    }
+}
+
+/// Diagnostic: unskinned draws whose constant buffer 4 (where a character keeps its origin) changed
+/// since the frame before for the same mesh, which are objects that moved: how they keep their
+/// transform, for motion of solid objects (pots, rocks, cut grass).
+void RasterizerVulkan::LogOcarinaMovingObject(const OcarinaVertexLayout& layout) {
+    if (layout.position != VK_FORMAT_R32G32B32_SFLOAT &&
+        layout.position != VK_FORMAT_R16G16B16A16_SFLOAT) {
+        return;
+    }
+    static std::map<std::tuple<GPUVAddr, GPUVAddr, u32>, std::pair<u64, std::array<f32, 32>>> last;
+    static u32 logged = 0;
+    if (logged >= 40) {
+        return;
+    }
+    const auto& draw = maxwell3d->draw_manager.draw_state;
+    const auto& regs = maxwell3d->regs;
+    std::array<f32, 32> cbuf{};
+    u32 cbuf_size = 0;
+    buffer_cache.ForEachBoundBuffer(false, [&](u32 stage, bool storage, u32 index, bool,
+                                                const auto& binding, u32 size, const auto*, u32) {
+        if (stage == 0 && !storage && index == 4 &&
+            !buffer_cache.IsRegionGpuModified(binding.device_addr, size)) {
+            cbuf_size = size;
+            device_memory.ReadBlockUnsafe(binding.device_addr, cbuf.data(),
+                                          (std::min<size_t>)(size, sizeof(cbuf)));
+        }
+    });
+    if (cbuf_size < 0x40) {
+        return;
+    }
+    const auto key = std::make_tuple(regs.vertex_streams[0].Address(),
+                                     draw.index_buffer.IndexStart(), draw.index_buffer.count);
+    auto& entry = last[key];
+    if (entry.first + 1 == render_trace_frame && entry.second != cbuf) {
+        std::string now, was;
+        for (size_t i = 0; i < 20; ++i) {
+            now += fmt::format(" {:.3f}", cbuf[i]);
+            was += fmt::format(" {:.3f}", entry.second[i]);
+        }
+        ++logged;
+        LOG_INFO(Render_Vulkan,
+                 "Ocarina moving object: stride {} position format {} indices {} cbuf4 {} B; "
+                 "now{} | was{}",
+                 layout.stride, static_cast<int>(layout.position), draw.index_buffer.count,
+                 cbuf_size, now, was);
+    }
+    entry = {render_trace_frame, cbuf};
+    if (last.size() > 4096) {
+        last.clear();
+    }
+}
+
+namespace {
+/// A model's vertex and index buffers and how it reads them: its GPU copy is kept by this.
+u64 OcarinaMeshKey(GPUVAddr vertex, GPUVAddr indices, u32 index_count, s32 base_vertex,
+                   const OcarinaVertexLayout& layout) {
+    u64 key = vertex * 0x9E3779B97F4A7C15ULL;
+    const auto mix = [&key](u64 value) {
+        key ^= value + 0x9E3779B97F4A7C15ULL + (key << 6) + (key >> 2);
+    };
+    mix(indices);
+    mix(index_count);
+    mix(static_cast<u32>(base_vertex));
+    mix(layout.stride | (u64{layout.position_offset} << 16) | (u64{layout.rigid} << 32) |
+        (u64{static_cast<u32>(layout.position)} << 40));
+    mix(u64{layout.weight_count} | (u64{layout.extra_count} << 8) |
+        (u64{layout.joints_offset} << 16) | (u64{layout.weights_offset} << 32));
+    return key;
+}
+} // Anonymous namespace
+
+/// Read the meshes of this frame's character draws that were drawn last frame too.
+void RasterizerVulkan::ReadOcarinaActors(std::vector<OcarinaActorMesh>& meshes) {
+    if (oot_actors_frame != render_trace_frame) {
         return;
     }
     const auto read = [&](GPUVAddr address, void* dst, size_t size) {
@@ -2982,27 +3324,116 @@ void RasterizerVulkan::ReadOcarinaActor(OcarinaActorMesh& mesh) {
         gpu_memory->ReadBlockUnsafe(address, dst, size);
         return true;
     };
-    constexpr size_t index_count = 9702;
-    constexpr size_t stride = 48;
-    std::vector<u16> indices(index_count);
-    if (!read(now.indices, indices.data(), indices.size() * sizeof(u16))) {
-        return;
+    for (const auto& now : oot_actors) {
+        const size_t stride = now.layout.stride;
+        const auto before = std::ranges::find_if(
+            oot_previous_actors, [&](const auto& actor) { return actor.SameMesh(now); });
+        if (now.channel != gpu_memory || before == oot_previous_actors.end()) {
+            continue;
+        }
+        const u64 key = OcarinaMeshKey(now.vertex, now.indices, now.index_count, now.base_vertex,
+                                       now.layout);
+        if (oot_live_dlss && oot_live_dlss->HasActorMesh(key)) {
+            meshes.push_back({now.layout, key, {}, {}, now.origin, before->origin, now.bones,
+                              before->bones});
+            continue;
+        }
+        std::vector<u16> indices(now.index_count);
+        if (!read(now.indices, indices.data(), indices.size() * sizeof(u16))) {
+            continue;
+        }
+        const auto [minimum, maximum] = std::ranges::minmax(indices);
+        const s64 first = static_cast<s64>(now.base_vertex) + minimum;
+        const u32 vertex_count = static_cast<u32>(maximum) - minimum + 1;
+        if (first < 0 || first > (1 << 20) || vertex_count > 65536) {
+            continue;
+        }
+        std::vector<u8> vertices(vertex_count * stride);
+        if (!read(now.vertex + first * stride, vertices.data(), vertices.size())) {
+            continue;
+        }
+        for (u16& index : indices) {
+            index -= minimum;
+        }
+        meshes.push_back({now.layout, key, std::move(vertices), std::move(indices), now.origin,
+                          before->origin, now.bones, before->bones});
     }
-    const auto [minimum, maximum] = std::ranges::minmax(indices);
-    const s64 first = static_cast<s64>(now.base_vertex) + minimum;
-    const u32 vertex_count = static_cast<u32>(maximum) - minimum + 1;
-    if (first < 0 || first > (1 << 20) || vertex_count > 16384) {
-        return;
+    const size_t characters = meshes.size();
+    // Solid objects that moved: paired with the nearest copy of their mesh in the frame before.
+    for (const auto& now : oot_rigid) {
+        if (meshes.size() >= characters + MaxOcarinaMovingObjects) {
+            break;
+        }
+        const auto previous = oot_previous_rigid.find(
+            now.vertex ^ (now.indices << 1) ^ (u64{now.index_count} << 40) ^
+            static_cast<u64>(static_cast<u32>(now.base_vertex)));
+        if (now.channel != gpu_memory || previous == oot_previous_rigid.end()) {
+            continue;
+        }
+        const OcarinaActorPose* before = nullptr;
+        f32 best = 300.0f * 300.0f; // farther, it is another object
+        for (const auto& candidate : previous->second) {
+            if (!candidate.SameMesh(now)) {
+                continue;
+            }
+            const f32 dx = candidate.bones[3] - now.bones[3];
+            const f32 dy = candidate.bones[7] - now.bones[7];
+            const f32 dz = candidate.bones[11] - now.bones[11];
+            const f32 distance = dx * dx + dy * dy + dz * dz;
+            if (distance < best) {
+                best = distance;
+                before = &candidate;
+            }
+        }
+        if (!before) {
+            continue;
+        }
+        bool moved = false;
+        for (size_t i = 0; i < 12 && !moved; ++i) {
+            moved = std::abs(now.bones[i] - before->bones[i]) > 1e-4f;
+        }
+        for (size_t i = 0; i < 3 && !moved; ++i) {
+            moved = std::abs(now.origin[i] - before->origin[i]) > 1e-4f;
+        }
+        if (!moved) {
+            continue; // standing still: the camera's motion is right
+        }
+        const size_t stride = now.layout.stride;
+        const u64 key = OcarinaMeshKey(now.vertex, now.indices, now.index_count, now.base_vertex,
+                                       now.layout);
+        if (oot_live_dlss && oot_live_dlss->HasActorMesh(key)) {
+            meshes.push_back({now.layout, key, {}, {}, now.origin, before->origin, now.bones,
+                              before->bones});
+            continue;
+        }
+        std::vector<u16> indices(now.index_count);
+        if (!read(now.indices, indices.data(), indices.size() * sizeof(u16))) {
+            continue;
+        }
+        const auto [minimum, maximum] = std::ranges::minmax(indices);
+        const s64 first = static_cast<s64>(now.base_vertex) + minimum;
+        const u32 vertex_count = static_cast<u32>(maximum) - minimum + 1;
+        if (first < 0 || first > (1 << 20) || vertex_count > 65536) {
+            continue;
+        }
+        std::vector<u8> vertices(vertex_count * stride);
+        if (!read(now.vertex + first * stride, vertices.data(), vertices.size())) {
+            continue;
+        }
+        for (u16& index : indices) {
+            index -= minimum;
+        }
+        meshes.push_back({now.layout, key, std::move(vertices), std::move(indices), now.origin,
+                          before->origin, now.bones, before->bones});
     }
-    std::vector<u8> vertices(vertex_count * stride);
-    if (!read(now.vertex + first * stride, vertices.data(), vertices.size())) {
-        return;
+    static u64 logged_frame = 0;
+    if (render_trace_frame >= logged_frame + 600) {
+        logged_frame = render_trace_frame;
+        LOG_INFO(Render_Vulkan,
+                 "Ocarina of Time: {} characters with their own motion ({} drawn), {} moving "
+                 "objects ({} solid draws)",
+                 characters, oot_actors.size(), meshes.size() - characters, oot_rigid.size());
     }
-    for (u16& index : indices) {
-        index -= minimum;
-    }
-
-    mesh = {std::move(vertices), std::move(indices), now.origin, before.origin, now.bones, before.bones};
 }
 
 /// Track the scene depth on its reader dispatch, or try to replace a recognized upscale dispatch.
@@ -3052,6 +3483,7 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         }
         if (reason != oot_fallback_reason) {
             oot_fallback_reason = reason;
+            oot_idle_reason.store(reason, std::memory_order_relaxed);
             oot_fallback_repeats = 0;
         }
         return false;
@@ -3093,9 +3525,13 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
     auto& target = texture_cache.GetImageView(written[0]);
     using VideoCore::Surface::PixelFormat;
     const auto extent = oot_motion.extent;
+    // The 1440p network runs at the output size: 1440p scenes go out at 4K with the HUD composited
+    // there; other sizes (1080p output) are replaced in place at the same size, as native AA.
+    const bool same_size =
+        target.size.width == extent.width && target.size.height == extent.height;
+    const bool four_k = upscale_4k && same_size && extent.width == 2560 && extent.height == 1440;
     const bool valid_extents = upscale_4k
-        ? extent.width == 2560 && extent.height == 1440 &&
-            target.size.width == 2560 && target.size.height == 1440
+        ? same_size
         : target.size.width == extent.width * 4 / 3 &&
             target.size.height == extent.height * 4 / 3;
     if (!valid_extents || !color.BackingImage() || !target.BackingImage() ||
@@ -3105,6 +3541,17 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         color.format != PixelFormat::E5B9G9R9_FLOAT || target.format != PixelFormat::B10G11R11_FLOAT ||
         color.size.width != extent.width || color.size.height != extent.height ||
         color.ImageHandle() == target.ImageHandle() || depth.ImageHandle() == target.ImageHandle()) {
+        // What the game handed its upscale, logged when it changes (to widen the checks above).
+        const std::string seen = fmt::format(
+            "scene {}x{}, colour {}x{} format {}, target {}x{} format {}, 4K {}, rescaled {}/{}",
+            extent.width, extent.height, color.size.width, color.size.height,
+            static_cast<int>(color.format), target.size.width, target.size.height,
+            static_cast<int>(target.format), upscale_4k, color.IsRescaled(), target.IsRescaled());
+        static std::string last_seen;
+        if (seen != last_seen) {
+            last_seen = seen;
+            LOG_INFO(Render_Vulkan, "Ocarina DLSS: upscale images: {}", seen);
+        }
         return fail("unexpected upscale images");
     }
 
@@ -3117,14 +3564,14 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
         return fail("unsupported storage format");
     }
     // Without Link's pose the mesh stays empty and the motion comes from the camera alone.
-    OcarinaActorMesh mesh;
-    ReadOcarinaActor(mesh);
+    std::vector<OcarinaActorMesh> meshes;
+    ReadOcarinaActors(meshes);
     try {
         const auto target_view =
             target.StorageView(Shader::TextureType::Color2D, Shader::ImageFormat::Typeless, false);
-        const auto scene_reference = upscale_4k ? target.Handle(Shader::TextureType::Color2D)
-                                                : VK_NULL_HANDLE;
-        if (!target_view || (upscale_4k && !scene_reference)) {
+        const auto scene_reference = four_k ? target.Handle(Shader::TextureType::Color2D)
+                                            : VK_NULL_HANDLE;
+        if (!target_view || (four_k && !scene_reference)) {
             return fail("no upscale target view");
         }
         if (!oot_live_dlss) {
@@ -3132,21 +3579,39 @@ bool RasterizerVulkan::TryOcarinaDlss(const ComputePipeline& pipeline, bool repl
                 device, scheduler, descriptor_pool, compute_pass_descriptor_queue, memory_allocator);
         }
         const VkExtent2D target_extent{target.size.width, target.size.height};
-        const VkExtent2D output_extent = upscale_4k ? VkExtent2D{3840, 2160} : target_extent;
+        const VkExtent2D output_extent = four_k ? VkExtent2D{3840, 2160} : target_extent;
+        // The HUD mask: the last frame's FSR 4 output before its HUD against the same image now,
+        // which still holds that frame with its HUD until this Record overwrites it.
+        static const bool hud_mask = [] {
+            const char* const value = std::getenv("EDEN_NX2_AMD_FG_HUD_MASK");
+            return !value || value[0] != '0';
+        }();
         const bool recorded = oot_live_dlss->Record(color_view, depth.DepthView(), target_view,
                                                    extent, output_extent, target_extent, oot_motion.current,
-                                                   oot_motion.previous, mesh, depth.ImageHandle(),
+                                                   oot_motion.previous, meshes, depth.ImageHandle(),
                                                    render_trace_frame);
         if (!recorded) {
             return fail("DLSS declined the frame");
         }
-        if (upscale_4k) {
+        if (four_k) {
             oot_live_dlss->SaveSceneReference(scene_reference);
             oot_4k_scene_frame = render_trace_frame;
             oot_4k_guest_present = VK_NULL_HANDLE;
         }
         oot_dlss_frame = render_trace_frame;
+        oot_scene_view = target.Handle(Shader::TextureType::Color2D);
+        oot_scene_image = target.ImageHandle();
+        oot_scene_frame = render_trace_frame;
+        oot_hud_frame.reset();
+        oot_hud_view = VK_NULL_HANDLE;
+        if (AmdFrameGen::Requested() && !four_k && hud_mask) {
+            SaveOcarinaPreHud(
+                target.ImageHandle(),
+                MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, target.format).format,
+                {target.size.width, target.size.height});
+        }
         oot_fallback_reason = nullptr;
+        oot_idle_reason.store(nullptr, std::memory_order_relaxed);
         return true;
     } catch (const vk::Exception& error) {
         LOG_WARNING(Render_Vulkan, "Ocarina DLSS unavailable: {}", error.what());
@@ -3439,6 +3904,271 @@ void RasterizerVulkan::AccelerateInlineToMemory(GPUVAddr address, size_t copy_si
     pipeline_cache.InvalidateRegion(*cpu_addr, copy_size);
 }
 
+#ifdef EGLANTINE_STREAMLINE
+void RasterizerVulkan::SaveOcarinaPreHud(VkImage source, VkFormat format, VkExtent2D extent) {
+    const bool create = !oot_pre_hud || oot_pre_hud_extent.width != extent.width ||
+                        oot_pre_hud_extent.height != extent.height || oot_pre_hud_format != format;
+    if (create) {
+        scheduler.Finish();
+        oot_pre_hud = memory_allocator.CreateImage({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = format,
+            .extent = {extent.width, extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        });
+        oot_pre_hud_view = device.GetLogical().CreateImageView({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = *oot_pre_hud,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = format,
+            .components = {},
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        });
+        oot_pre_hud_extent = extent;
+        oot_pre_hud_format = format;
+    }
+    const VkImage destination = *oot_pre_hud;
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([source, destination, extent, create](vk::CommandBuffer cmdbuf) {
+        constexpr VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const auto barrier = [&](VkImage image, VkAccessFlags src, VkAccessFlags dst,
+                                 VkImageLayout old_layout) {
+            return VkImageMemoryBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = src,
+                .dstAccessMask = dst,
+                .oldLayout = old_layout,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresourceRange = range,
+            };
+        };
+        const std::array before{
+            barrier(source, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL),
+            barrier(destination, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    create ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL),
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                               {}, {}, before);
+        const VkImageCopy copy{
+            .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .srcOffset = {},
+            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .dstOffset = {},
+            .extent = {extent.width, extent.height, 1},
+        };
+        cmdbuf.CopyImage(source, VK_IMAGE_LAYOUT_GENERAL, destination, VK_IMAGE_LAYOUT_GENERAL,
+                         copy);
+        const std::array after{
+            barrier(source, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL),
+            barrier(destination, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL),
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                               {}, {}, after);
+    });
+    scheduler.InvalidateState();
+    oot_pre_hud_frame = render_trace_frame;
+}
+
+void RasterizerVulkan::SaveOcarinaHudless() {
+    const auto target_id = texture_cache.GetRenderTargets().color_buffer_ids[0];
+    if (!target_id) {
+        return;
+    }
+    const auto& target = texture_cache.GetImageView(target_id);
+    const VkImage source = target.ImageHandle();
+    const VkExtent2D extent{target.size.width, target.size.height};
+    const VkFormat format =
+        MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, target.format).format;
+    if (!source || target.IsRescaled() || extent.width == 0 || extent.height == 0) {
+        return;
+    }
+    static u32 logged = 0;
+    if (logged++ % 600 == 0) {
+        LOG_INFO(Render_Vulkan,
+                 "AMD frame generation: hudless frame {}x{} format {}; {} draws went over the "
+                 "previous one (the HUD)",
+                 extent.width, extent.height, static_cast<u32>(format), oot_draws_after_hudless);
+    }
+    oot_draws_after_hudless = 0;
+    const bool create = !oot_hudless_image || oot_hudless_extent.width != extent.width ||
+                        oot_hudless_extent.height != extent.height || oot_hudless_format != format;
+    if (create) {
+        scheduler.Finish();
+        oot_hudless_image = memory_allocator.CreateImage({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = format,
+            .extent = {extent.width, extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        });
+        oot_hudless_view = device.GetLogical().CreateImageView({
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .image = *oot_hudless_image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = format,
+            .components = {},
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        });
+        oot_hudless_extent = extent;
+        oot_hudless_format = format;
+        // 8-bit sRGB RGBA (the game's presented image): read raw, and an rgba8 output with an
+        // sRGB view, so the parts without HUD keep the presented bytes exactly.
+        oot_hudless_raw_view = {};
+        oot_hudless_out = {};
+        oot_hudless_out_storage = {};
+        oot_hudless_out_view = {};
+        if (format == VK_FORMAT_A8B8G8R8_SRGB_PACK32 || format == VK_FORMAT_R8G8B8A8_SRGB) {
+            const auto view = [&](VkImage image, VkFormat view_format) {
+                return device.GetLogical().CreateImageView({
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                    .pNext = nullptr,
+                    .flags = 0,
+                    .image = image,
+                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                    .format = view_format,
+                    .components = {},
+                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                });
+            };
+            oot_hudless_raw_view = view(*oot_hudless_image, VK_FORMAT_R8G8B8A8_UNORM);
+            oot_hudless_out = memory_allocator.CreateImage({
+                .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT,
+                .imageType = VK_IMAGE_TYPE_2D,
+                .format = VK_FORMAT_R8G8B8A8_UNORM,
+                .extent = {extent.width, extent.height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = VK_SAMPLE_COUNT_1_BIT,
+                .tiling = VK_IMAGE_TILING_OPTIMAL,
+                .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = nullptr,
+                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            });
+            oot_hudless_out_storage = view(*oot_hudless_out, VK_FORMAT_R8G8B8A8_UNORM);
+            oot_hudless_out_view = view(*oot_hudless_out, VK_FORMAT_R8G8B8A8_SRGB);
+        }
+    }
+    const VkImage destination = *oot_hudless_image;
+    scheduler.RequestOutsideRenderPassOperationContext();
+    scheduler.Record([source, destination, extent, create](vk::CommandBuffer cmdbuf) {
+        constexpr VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const auto barrier = [&](VkImage image, VkAccessFlags src, VkAccessFlags dst,
+                                 VkImageLayout old_layout) {
+            return VkImageMemoryBarrier{
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = src,
+                .dstAccessMask = dst,
+                .oldLayout = old_layout,
+                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = image,
+                .subresourceRange = range,
+            };
+        };
+        const std::array before{
+            barrier(source, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL),
+            barrier(destination, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    create ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL),
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                               {}, {}, before);
+        const VkImageCopy copy{
+            .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .srcOffset = {},
+            .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+            .dstOffset = {},
+            .extent = {extent.width, extent.height, 1},
+        };
+        cmdbuf.CopyImage(source, VK_IMAGE_LAYOUT_GENERAL, destination, VK_IMAGE_LAYOUT_GENERAL,
+                         copy);
+        const std::array after{
+            barrier(source, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                        VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL),
+            barrier(destination, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL),
+        };
+        cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                               {}, {}, after);
+    });
+    scheduler.InvalidateState();
+    oot_hudless_source = source;
+    oot_hudless_frame = render_trace_frame;
+    oot_hudless_masked = false;
+    if (oot_hudless_out && oot_scene_frame == render_trace_frame && oot_scene_view && oot_live_dlss) {
+        // EDEN_NX2_AMD_FG_HUD_DIFF: the sRGB difference from the scene above which a pixel is HUD.
+        static const f32 threshold = [] {
+            const char* const value = std::getenv("EDEN_NX2_AMD_FG_HUD_DIFF");
+            return value ? std::strtof(value, nullptr) : 0.1f;
+        }();
+        oot_live_dlss->MakeHudless(oot_scene_view, *oot_hudless_raw_view, *oot_hudless_out,
+                                   *oot_hudless_out_storage, extent, threshold);
+        oot_hudless_masked = true;
+    }
+}
+#endif
+
+bool RasterizerVulkan::OcarinaHudlessReady() const {
+#ifdef EGLANTINE_STREAMLINE
+    // EDEN_NX2_AMD_FG_HUDLESS=1 while it is tested: off, the HUD moves with generated frames.
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_AMD_FG_HUDLESS");
+        return value && value[0] == '1';
+    }();
+    return enabled && oot_hudless_frame == render_trace_frame && oot_hudless_masked;
+#else
+    return false;
+#endif
+}
+
+void RasterizerVulkan::PresentOcarinaHudless(bool on) {
+#ifdef EGLANTINE_STREAMLINE
+    oot_present_hudless = on;
+#endif
+}
+
 std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     const Tegra::FramebufferConfig& config, DAddr framebuffer_addr, u32 pixel_stride) {
     if (!framebuffer_addr) {
@@ -3457,6 +4187,24 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
     if (!image_view) {
         return {};
     }
+#ifdef EGLANTINE_STREAMLINE
+    if (oot_present_hudless) {
+        // The hudless present pass: the same image as the game presents, without its HUD.
+        if (scaled || image_view->ImageHandle() != oot_hudless_source || !OcarinaHudlessReady()) {
+            return {};
+        }
+        FramebufferTextureInfo hudless{};
+        hudless.image = *oot_hudless_out;
+        hudless.image_view = *oot_hudless_out_view;
+        hudless.width = image_view->size.width;
+        hudless.height = image_view->size.height;
+        hudless.scaled_width = hudless.width;
+        hudless.scaled_height = hudless.height;
+        hudless.anti_aliased =
+            oot_dlss_frame == render_trace_frame && !oot_live_dlss->EvaluationFailed();
+        return hudless;
+    }
+#endif
     if (frame_dump.Capturing()) {
         frame_dump.EndPass();
         frame_dump.CapturePresent(*image_view);
@@ -3485,6 +4233,11 @@ std::optional<FramebufferTextureInfo> RasterizerVulkan::AccelerateDisplay(
         !oot_live_dlss->EvaluationFailed() && !frame_dump.Capturing()) {
         try {
             oot_live_dlss->Composite4k(info.image_view, render_trace_frame);
+            if (AmdFrameGen::Requested()) {
+                // The HUD mask for AMD frame generation in the 4K mode: the next frame's motion is
+                // cleared where the HUD sits, so the HUD doesn't move in generated frames.
+                oot_live_dlss->MakeHudMask4k(info.image_view);
+            }
             info.image = oot_live_dlss->CompositedImage();
             info.image_view = oot_live_dlss->CompositedView();
             info.scaled_width = 3840;

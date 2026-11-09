@@ -1,0 +1,23 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// Ocarina of Time draws its HUD into FSR 4's output before the final pass scales it up. A pixel
+// that changed between FSR 4's output and the final pass is HUD.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D before_hud;
+layout(binding = 1) uniform sampler2D after_hud;
+layout(binding = 2, r8) uniform writeonly image2D hud_mask;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(hud_mask)))) {
+        return;
+    }
+    vec4 difference = abs(texelFetch(after_hud, pixel, 0) - texelFetch(before_hud, pixel, 0));
+    float changed = max(max(difference.r, difference.g), max(difference.b, difference.a));
+    // Any change: a HUD element's soft edge or shadow changes the scene only slightly.
+    imageStore(hud_mask, pixel, vec4(changed > 0.0 ? 1.0 : 0.0));
+}

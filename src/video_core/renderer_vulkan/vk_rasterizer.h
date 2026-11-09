@@ -7,8 +7,11 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <unordered_map>
 #include <optional>
 #include <string_view>
+#include <utility>
 
 #include <boost/container/static_vector.hpp>
 
@@ -21,6 +24,7 @@
 #include "video_core/oot_network.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/blit_image.h"
+#include "video_core/renderer_vulkan/vk_ocarina_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_descriptor_buffer.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
@@ -171,6 +175,11 @@ public:
     void BindChannel(Tegra::Control::ChannelState& channel) override;
 
     void ReleaseChannel(s32 channel_id) override;
+    /// AMD frame generation: whether this frame has a hudless copy of the image it presents, and
+    /// while `on`, AccelerateDisplay hands that copy out instead (for the hudless present pass).
+    [[nodiscard]] bool OcarinaHudlessReady() const;
+    void PresentOcarinaHudless(bool on);
+
     std::optional<FramebufferTextureInfo> AccelerateDisplay(const Tegra::FramebufferConfig& config,
                                                             VAddr framebuffer_addr,
                                                             u32 pixel_stride);
@@ -195,6 +204,10 @@ private:
     void TraceDrawFailure(std::string_view reason);
     /// Remembers render target 0 of a draw with one of Ocarina of Time's tonemap shaders.
     void TrackOotTonemappedImage(const GraphicsPipeline& pipeline);
+#ifdef EGLANTINE_STREAMLINE
+    void SaveOcarinaHudless();
+    void SaveOcarinaPreHud(VkImage source, VkFormat format, VkExtent2D extent);
+#endif
     bool TryNx2IndirectReset(bool is_indexed, u32 instance_count);
 
     void FlushWork();
@@ -245,6 +258,12 @@ private:
     void UpdateVertexInput(Tegra::Engines::Maxwell3D::Regs& regs);
 
     void FrameDumpPass(const Framebuffer* framebuffer);
+
+public:
+    /// AMD FSR frame generation is on but not generating: a short tag and the full reason.
+    [[nodiscard]] std::pair<const char*, const char*> AmdFrameGenIdleReason() const;
+
+private:
     /// EDEN_NX2_PENDING_WRITE_TRACE: logs bound buffer ranges with collected, unapplied CPU writes.
     void TracePendingCpuWrites(bool compute, std::span<const u64> shader_hashes);
 #ifdef EGLANTINE_STREAMLINE
@@ -252,7 +271,10 @@ private:
     void TrackOcarinaCamera();
     void TrackOcarinaActor(u64 shader_hash, bool is_indexed, bool is_indirect);
     bool TryOcarinaDlss(const ComputePipeline& pipeline, bool replace);
-    void ReadOcarinaActor(struct OcarinaActorMesh& mesh);
+    void ReadOcarinaActors(std::vector<struct OcarinaActorMesh>& meshes);
+    void LogOcarinaSkinnedLayout();
+    void LogOcarinaMovingObject(const OcarinaVertexLayout& layout);
+    void TrackOcarinaRigid(const OcarinaVertexLayout& layout);
 #endif
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
     bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
@@ -306,19 +328,66 @@ private:
     std::unique_ptr<class OcarinaLiveDlss> oot_live_dlss;
     bool oot_live_failed{};
     const char* oot_fallback_reason{};
+    /// The last reason Ocarina's FSR path declined a frame, for the status bar (UI thread).
+    std::atomic<const char*> oot_idle_reason{};
     u32 oot_fallback_repeats{};
     std::optional<u64> oot_dlss_frame;
     std::optional<u64> oot_4k_scene_frame;
     VkImage oot_4k_guest_present{};
+    /// AMD frame generation: the presented image as the game's last full-screen pass left it,
+    /// before the HUD is drawn over it (the hudless frame AMD tells the HUD apart with).
+    vk::Image oot_hudless_image;
+    vk::ImageView oot_hudless_view;
+    VkExtent2D oot_hudless_extent{};
+    VkFormat oot_hudless_format{};
+    VkImage oot_hudless_source{};
+    std::optional<u64> oot_hudless_frame;
+    bool oot_present_hudless{};
+    /// The scene the final pass reads (FSR 4's output), to rebuild what the HUD covers.
+    VkImageView oot_scene_view{};
+    std::optional<u64> oot_scene_frame;
+    vk::ImageView oot_hudless_raw_view; ///< The copy's bytes, read without sRGB decoding
+    vk::Image oot_hudless_out;          ///< The copy with the HUD replaced by the scene
+    vk::ImageView oot_hudless_out_storage;
+    vk::ImageView oot_hudless_out_view;
+    bool oot_hudless_masked{};
+    /// AMD frame generation: FSR 4's output copied before the game draws its HUD into it.
+    vk::Image oot_pre_hud;
+    vk::ImageView oot_pre_hud_view;
+    VkExtent2D oot_pre_hud_extent{};
+    VkFormat oot_pre_hud_format{};
+    std::optional<u64> oot_pre_hud_frame;
+    VkImage oot_scene_image{};          ///< FSR 4's output this frame, only compared, never used
+    VkImageView oot_hud_view{};         ///< That image as the last HUD draw into it had it bound
+    std::optional<u64> oot_hud_frame;
+    u32 oot_draws_after_hudless{};
     struct OcarinaActorPose {
-        u64 frame{};
+        OcarinaVertexLayout layout;
         const Tegra::MemoryManager* channel{};
         GPUVAddr vertex{};
         GPUVAddr indices{};
         s32 base_vertex{};
+        u32 index_count{};
         std::array<f32, 4> origin{};
         std::array<f32, 280 * 12> bones{};
-    } oot_actor, oot_previous_actor;
+
+        bool SameMesh(const OcarinaActorPose& other) const {
+            return channel == other.channel && vertex == other.vertex &&
+                   indices == other.indices && base_vertex == other.base_vertex &&
+                   index_count == other.index_count && layout == other.layout;
+        }
+    };
+    /// Skinned draws of this frame and the frame before (characters' motion for FSR 4 and AMD
+    /// frame generation), at most MaxOcarinaActors a frame.
+    std::vector<OcarinaActorPose> oot_actors;
+    std::vector<OcarinaActorPose> oot_previous_actors;
+    /// Solid objects of this frame, and those of the frame before by mesh (many share one).
+    std::vector<OcarinaActorPose> oot_rigid;
+    std::unordered_map<u64, std::vector<OcarinaActorPose>> oot_previous_rigid;
+    static constexpr size_t MaxOcarinaRigid = 4096;
+    u64 oot_actors_frame{};
+    static constexpr size_t MaxOcarinaActors = 64;
+    static constexpr size_t MaxOcarinaMovingObjects = 64; ///< Their own slots: characters filled all
 #endif
     u64 render_trace_frame = 0;
     u32 render_trace_draws = 0;

@@ -1,0 +1,24 @@
+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+// Ocarina of Time's 4K mode: the game draws its HUD on its own 1440p image, which Lichii lays over
+// FSR's 4K output. A pixel whose 1440p composite differs from the 1440p scene saved before the HUD
+// is HUD. The game's final pass shifts colours slightly everywhere, so small differences are not
+// HUD: the same lower edge the 4K composite uses (ocarina_dlss_4k_composite.comp).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D before_hud;
+layout(binding = 1) uniform sampler2D after_hud;
+layout(binding = 2, r8) uniform writeonly image2D hud_mask;
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, imageSize(hud_mask)))) {
+        return;
+    }
+    vec3 difference = abs(texelFetch(after_hud, pixel, 0).rgb - texelFetch(before_hud, pixel, 0).rgb);
+    float changed = max(max(difference.r, difference.g), difference.b);
+    imageStore(hud_mask, pixel, vec4(changed > 0.025 ? 1.0 : 0.0));
+}
