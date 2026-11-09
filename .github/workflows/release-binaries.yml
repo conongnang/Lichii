@@ -625,7 +625,12 @@ jobs:
           }
           pgo_note=""
           if [[ -n "$has_pgo" ]]; then
-            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less. Try both: some users report the standard (non-PGO) build runs better on their PC."
+            pgo_note="The PGO builds are the same programs compiled with profile-guided optimization. Linux uses clang with Eglantine's profile; Windows uses clang-cl and ThinLTO with a profile trained in Lichii on Ocarina of Time, so other games gain less."
+          fi
+
+          pgo_section=""
+          if [[ -n "$has_pgo" ]]; then
+            pgo_section=$'## Standard or PGO: try both\n\n> [!IMPORTANT]\n> Every platform has a **standard** and a **PGO** build, and neither is always faster: some users report the standard build runs better on their PC. Try both and keep the one that runs best for you.\n'
           fi
 
           cat > notes.md <<EOF
@@ -634,6 +639,7 @@ jobs:
           > [!TIP]
           > **Ocarina of Time above 60 fps:** press **Ctrl+U** (the Toggle Framerate Limit hotkey) to unlock the frame rate, or set **Frame rate limit (Switch 2)** under the game's Properties > Graphics (e.g. 120; applies when the game starts) to cap it there. The **FPS Unlock (built-in)** add-on, on by default, keeps animations and physics at normal speed at any frame rate; leave it enabled.
 
+          ${pgo_section}
           ## Linux
 
           Linux packages come as an AppImage (self-contained, needs glibc 2.39 or newer: Ubuntu 24.04, Fedora 40, Debian 13, Arch) and a tar.gz (uses your system libraries, so Qt 6 and the usual libraries must be installed).
