@@ -159,7 +159,8 @@ def load_save(slot):
         if on_save_list(px):
             break
         if in_gameplay(px):
-            sys.exit("already in gameplay; restart with --kill")
+            print("booted into gameplay (the game resumed its last spot); measuring there")
+            return
         press("A", 1.0)
     else:
         sys.exit("never reached the save list")
