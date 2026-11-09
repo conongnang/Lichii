@@ -263,6 +263,20 @@ add_custom_command(TARGET yuzu POST_BUILD
         "${PROJECT_SOURCE_DIR}/dist/nx2_switches.txt" "$<TARGET_FILE_DIR:yuzu>/nx2_switches.txt"
     VERBATIM)
 
+# AMD FSR 4: AMD's signed FidelityFX DLLs, loaded at runtime from the executable's folder, and the
+# license they are redistributed under (externals/FidelityFX-SDK-2.4).
+if (WIN32)
+    set(FSR4_DIR "${PROJECT_SOURCE_DIR}/externals/FidelityFX-SDK-2.4")
+    add_custom_command(TARGET yuzu POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FSR4_DIR}/bin/amd_fidelityfx_loader_vk.dll"
+            "${FSR4_DIR}/bin/amd_fidelityfx_upscaler_vk.dll"
+            "$<TARGET_FILE_DIR:yuzu>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${FSR4_DIR}/LICENSE.md" "$<TARGET_FILE_DIR:yuzu>/AMD-FidelityFX-LICENSE.md"
+        VERBATIM)
+endif()
+
 if (YUZU_CRASH_DUMPS)
     target_sources(yuzu PRIVATE
         breakpad.cpp

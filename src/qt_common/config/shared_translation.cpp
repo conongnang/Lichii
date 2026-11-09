@@ -166,6 +166,12 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Strength of RCAS (AMD's contrast-adaptive sharpening) on the upscaler used in place "
               "of a game's DLSS (AMD FSR 3.1); 0% turns it off.\nAlso sets the sharpening "
               "of the AMD FSR 1 and SGSR window adapting filters."));
+    INSERT(Settings, amd_fsr4, tr("Use AMD FSR 4 in place of a game's DLSS"),
+           tr("Uses AMD FSR 4 (machine-learning upscaling) in place of a Switch 2 game's own DLSS, "
+              "instead of FSR 3.1, on GPUs AMD's FSR runtime supports: Radeon RX 9000, and RX 7000 "
+              "and RX 6000 with a recent driver. Other GPUs keep FSR 3.1.\nNeeds Resolution 1X: at "
+              "other resolutions the game's own upscaler is used.\nWindows only. NVIDIA DLSS, when "
+              "it is on and available, is used first.\nTakes effect when the game starts."));
     INSERT(Settings, nvidia_dlss, tr("Use NVIDIA DLSS in place of a game's DLSS (experimental)"),
            tr("Uses NVIDIA DLSS on GeForce RTX cards in place of a Switch 2 game's own DLSS, "
               "instead of AMD FSR 3.1.\nNeeds NVIDIA's Streamline loader, and NVIDIA DLSS unless "

@@ -1874,6 +1874,21 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
         return true;
     }
 #endif
+    // FSR's own RCAS, set by the sharpness slider: FSR takes 0-1 for 2 to 0 stops, and the slider
+    // stores stops x 100, so this is the percentage the slider shows; 0% (stored 200) is off.
+    // EDEN_NX2_TEMPORAL_SHARPEN=<stops>|off overrides the slider.
+    static const char* const sharpen_override = std::getenv("EDEN_NX2_TEMPORAL_SHARPEN");
+    const int slider = Settings::values.fsr_sharpening_slider.GetValue();
+    bool sharpen = slider < 200;
+    f32 stops = static_cast<f32>(slider) / 100.0f;
+    if (sharpen_override) {
+        sharpen = std::string_view{sharpen_override} != "off";
+        stops = static_cast<f32>(std::strtod(sharpen_override, nullptr));
+    }
+    if (UpscaleWithFsr4(dst_framebuffer, input_color, motion_vectors, depth, render_size, jitter,
+                        motion_scale, frame_time_ms, reset, sharpen, 1.0f - stops / 2.0f)) {
+        return true;
+    }
     if (fsr3_unsupported) {
         return false;
     }
@@ -1894,17 +1909,6 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
             fsr3_unsupported = true;
             return false;
         }
-    }
-    // FSR's own RCAS, set by the sharpness slider: FSR takes 0-1 for 2 to 0 stops, and the slider
-    // stores stops x 100, so this is the percentage the slider shows; 0% (stored 200) is off.
-    // EDEN_NX2_TEMPORAL_SHARPEN=<stops>|off overrides the slider.
-    static const char* const sharpen_override = std::getenv("EDEN_NX2_TEMPORAL_SHARPEN");
-    const int slider = Settings::values.fsr_sharpening_slider.GetValue();
-    bool sharpen = slider < 200;
-    f32 stops = static_cast<f32>(slider) / 100.0f;
-    if (sharpen_override) {
-        sharpen = std::string_view{sharpen_override} != "off";
-        stops = static_cast<f32>(std::strtod(sharpen_override, nullptr));
     }
     try {
         fsr3_upscaler->Upscale({
@@ -1933,6 +1937,90 @@ bool TextureCacheRuntime::UpscaleWithFsr3(Framebuffer* dst_framebuffer, ImageVie
     if (!logged) {
         logged = true;
         LOG_INFO(Render_Vulkan, "DLSS replaced by FSR 3.1: {}x{} -> {}x{}", render_size[0],
+                 render_size[1], extent.width, extent.height);
+    }
+    return true;
+}
+
+bool TextureCacheRuntime::UpscaleWithFsr4(Framebuffer* dst_framebuffer, ImageView& input_color,
+                                          ImageView& motion_vectors, ImageView& depth,
+                                          std::array<u32, 2> render_size,
+                                          std::array<f32, 2> jitter,
+                                          std::array<f32, 2> motion_scale, f32 frame_time_ms,
+                                          bool reset, bool sharpen, f32 sharpness) {
+    // EDEN_NX2_DLSS_REPLACEMENT=fsr keeps FSR 3.1 for A/B runs.
+    static const bool force_fsr3 = [] {
+        const char* const value = std::getenv("EDEN_NX2_DLSS_REPLACEMENT");
+        return value && std::string_view{value} == "fsr";
+    }();
+    if (force_fsr3 || fsr4_unsupported) {
+        return false;
+    }
+    if (!fsr4_upscaler) {
+        // Only FSR 4 here: without it, Lichii's own FSR 3.1 stays (AMD's FSR 3.1 is for Ocarina,
+        // whose frame generation needs it).
+        if (!Fsr4Upscaler::IsFsr4(device)) {
+            fsr4_unsupported = true;
+            return false;
+        }
+        try {
+            fsr4_upscaler = std::make_unique<Fsr4Upscaler>(device, scheduler, memory_allocator);
+        } catch (const vk::Exception& exception) {
+            LOG_WARNING(Render_Vulkan, "FSR 4 unavailable ({}); using FSR 3.1", exception.what());
+            fsr4_unsupported = true;
+            return false;
+        }
+    }
+    const auto image = [&](ImageView& view, VkImageView handle, VkImageAspectFlags aspect) {
+        return Fsr4Upscaler::Image{
+            .view = handle,
+            .image = view.ImageHandle(),
+            .format = MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, false, view.format)
+                          .format,
+            .range{
+                .aspectMask = aspect,
+                .baseMipLevel = static_cast<u32>(view.range.base.level),
+                .levelCount = 1,
+                .baseArrayLayer = static_cast<u32>(view.range.base.layer),
+                .layerCount = 1,
+            },
+            .barrier_aspect = ImageAspectMask(view.format),
+        };
+    };
+    const VkExtent2D extent = dst_framebuffer->RenderArea();
+    bool upscaled{};
+    try {
+        upscaled = fsr4_upscaler->Upscale({
+            .color = image(input_color, input_color.Handle(Shader::TextureType::Color2D),
+                           VK_IMAGE_ASPECT_COLOR_BIT),
+            .depth = image(depth, depth.DepthView(), VK_IMAGE_ASPECT_DEPTH_BIT),
+            .motion_vectors = image(motion_vectors,
+                                    motion_vectors.Handle(Shader::TextureType::Color2D),
+                                    VK_IMAGE_ASPECT_COLOR_BIT),
+            .render_size = {render_size[0], render_size[1]},
+            .upscale_size = extent,
+            .jitter = jitter,
+            .motion_vector_scale = {motion_scale[0] * static_cast<f32>(render_size[0]),
+                                    motion_scale[1] * static_cast<f32>(render_size[1])},
+            .frame_time_ms = frame_time_ms,
+            .reset = reset,
+            .sharpen = sharpen,
+            .sharpness = sharpness,
+        });
+    } catch (const vk::Exception& exception) {
+        LOG_WARNING(Render_Vulkan, "FSR 4 evaluation unavailable ({}); using FSR 3.1",
+                    exception.what());
+    }
+    if (!upscaled) {
+        fsr4_unsupported = true;
+        return false;
+    }
+    DrawUpscaledOutput(dst_framebuffer, fsr4_upscaler->OutputView(), fsr4_upscaler->OutputImage(),
+                       fsr4_upscaler->PointSampler());
+    static bool logged{};
+    if (!logged) {
+        logged = true;
+        LOG_INFO(Render_Vulkan, "DLSS replaced by AMD FSR 4: {}x{} -> {}x{}", render_size[0],
                  render_size[1], extent.width, extent.height);
     }
     return true;
