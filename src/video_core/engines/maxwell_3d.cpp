@@ -20,6 +20,7 @@
 #include "core/core.h"
 #include "core/core_timing.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/nx2_live_switches.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/gpu.h"
@@ -900,6 +901,11 @@ void Maxwell3D::ProcessQueryGet() {
 
 void Maxwell3D::ProcessQueryCondition() {
     if (rasterizer->AccelerateConditionalRendering()) {
+        execute_on = true;
+        return;
+    }
+    // The debug server's render_conditions switch (nx2_live_switches.h).
+    if (!VideoCommon::Nx2Live::RenderConditions()) {
         execute_on = true;
         return;
     }

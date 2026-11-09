@@ -24,6 +24,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
+#include "video_core/nx2_live_switches.h"
 #include "video_core/query_cache/bank_base.h"
 #include "video_core/query_cache/frame_trace.h"
 #include "video_core/query_cache/query_base.h"
@@ -440,6 +441,10 @@ void QueryCacheBase<Traits>::NotifySegment(bool resume) {
 
 template <typename Traits>
 bool QueryCacheBase<Traits>::AccelerateHostConditionalRendering() {
+    if (!Nx2Live::RenderConditions()) {
+        impl->runtime.EndHostConditionalRendering();
+        return false;
+    }
     bool qc_dirty = false;
     const auto gen_lookup = [this, &qc_dirty](GPUVAddr address) -> VideoCommon::LookupData {
         auto cpu_addr_opt = gpu_memory->GpuToCpuAddress(address);

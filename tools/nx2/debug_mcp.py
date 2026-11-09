@@ -145,8 +145,9 @@ TOOLS = [
     {
         "name": "switches",
         "description": "Lists the GPU shortcuts that can be turned off and on while the game runs "
-                       "(fast_draw, geometry_sync_skip, ubo_reuse, mme_memo) with their state; "
-                       "'set' ({name: bool}) changes them and returns the previous values.",
+                       "(fast_draw, geometry_sync_skip, ubo_reuse, mme_memo, render_conditions) "
+                       "with their state; 'set' ({name: bool}) changes them and returns the "
+                       "previous values.",
         "inputSchema": {
             "type": "object",
             "properties": {"set": {"type": "object", "additionalProperties": {"type": "boolean"}}},
