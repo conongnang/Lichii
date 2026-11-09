@@ -45,6 +45,8 @@
 #include "util/util.h"
 #include "yuzu/game/game_list.h"
 #include "yuzu/nup_dialogs.h"
+#include "yuzu/shader_warm_dialog.h"
+#include "video_core/shader_warm/shader_warm_builder.h"
 
 #include "applets/qt_amiibo_settings.h"
 #include "applets/qt_controller.h"
@@ -129,6 +131,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #ifdef ENABLE_UPDATE_CHECKER
 #include "frontend_common/update_checker.h"
+#include "frontend_common/update_installer.h"
 #endif
 
 // Common //
@@ -443,16 +446,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     UpdateWindowTitle();
 
     show();
-
-#ifdef ENABLE_UPDATE_CHECKER
-    if (UISettings::values.check_for_updates) {
-        update_future = QtConcurrent::run(
-            []() -> std::optional<Common::Net::Release> { return UpdateChecker::GetUpdate(); });
-        update_watcher.connect(&update_watcher, &QFutureWatcher<QString>::finished, this,
-                               &MainWindow::OnEmulatorUpdateAvailable);
-        update_watcher.setFuture(update_future);
-    }
-#endif
 
     // Setup content providers.
     QtCommon::SetupContentProviders();
@@ -1062,6 +1055,31 @@ void MainWindow::InitializeWidgets() {
 
     statusBar()->insertPermanentWidget(0, volume_button);
 
+    frame_gen_status_button = new QPushButton();
+    frame_gen_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
+    frame_gen_status_button->setFocusPolicy(Qt::NoFocus);
+    frame_gen_status_button->setCheckable(true);
+    connect(frame_gen_status_button, &QPushButton::clicked, this, [this] {
+        Settings::values.frame_gen.SetValue(!Settings::values.frame_gen.GetValue());
+        UpdateFrameGenButton();
+    });
+    UpdateFrameGenButton();
+    frame_gen_status_button->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(frame_gen_status_button, &QPushButton::customContextMenuRequested,
+            [this](const QPoint& menu_location) {
+                QMenu context_menu;
+                for (auto const& [type, text] : ConfigurationShared::frame_gen_type_texts_map) {
+                    context_menu.addAction(text, [this, type] {
+                        Settings::values.frame_gen_type.SetValue(type);
+                        Settings::values.frame_gen.SetValue(true);
+                        UpdateFrameGenButton();
+                    });
+                }
+                context_menu.exec(frame_gen_status_button->mapToGlobal(menu_location));
+                frame_gen_status_button->repaint();
+            });
+    statusBar()->insertPermanentWidget(0, frame_gen_status_button);
+
 #ifdef HAS_RESHADE
     post_shader_status_button = new QPushButton();
     post_shader_status_button->setObjectName(QStringLiteral("TogglableStatusBarButton"));
@@ -1479,6 +1497,10 @@ void MainWindow::ConnectWidgetEvents() {
             &MainWindow::OnGameListVerifyIntegrity);
     connect(game_list, &GameList::ConvertToNupRequested, this,
             &MainWindow::OnGameListConvertToNup);
+    connect(game_list, &GameList::PrepareShaderWarmRequested, this,
+            &MainWindow::OnGameListPrepareShaderWarm);
+    connect(game_list, &GameList::DeleteShaderWarmRequested, this,
+            &MainWindow::OnGameListDeleteShaderWarm);
     connect(game_list, &GameList::ExtractNupRequested, this, &MainWindow::OnGameListExtractNup);
     connect(game_list, &GameList::EditNupMetadataRequested, this,
             &MainWindow::OnGameListEditNupMetadata);
@@ -1654,6 +1676,65 @@ void MainWindow::ConnectMenuEvents() {
     connect_menu(ui->action_About, &MainWindow::OnAbout);
     connect_menu(ui->action_Eden_Dependencies, &MainWindow::OnEdenDependencies);
     connect_menu(ui->action_Data_Manager, &MainWindow::OnDataDialog);
+
+#if defined(ENABLE_UPDATE_CHECKER) && (defined(__linux__) || defined(_WIN32))
+    auto* restore_action = ui->menu_Help->addAction(tr("Restore Previous Version..."));
+    restore_action->setVisible(false);
+#ifdef __linux__
+    const auto previous_version = [] {
+        const std::filesystem::path target{qEnvironmentVariable("APPIMAGE").toStdString()};
+        std::error_code ec;
+        return !target.empty() && std::filesystem::is_regular_file(
+                                      UpdateInstaller::PreviousPath(target), ec)
+                   ? target
+                   : std::filesystem::path{};
+    };
+#else
+    const auto previous_version = [] {
+        const std::filesystem::path backup =
+            std::filesystem::path{QCoreApplication::applicationDirPath().toStdWString()} /
+            UpdateInstaller::BackupName;
+        std::error_code ec;
+        return std::filesystem::is_directory(backup, ec) ? backup : std::filesystem::path{};
+    };
+#endif
+    connect(ui->menu_Help, &QMenu::aboutToShow, restore_action,
+            [restore_action, previous_version] {
+                restore_action->setVisible(!previous_version().empty());
+            });
+    connect(restore_action, &QAction::triggered, this, [this, previous_version] {
+        const auto previous = previous_version();
+        if (previous.empty()) {
+            return;
+        }
+        const auto answer = QtCommon::Frontend::Question(
+            tr("Restore Previous Version"),
+            tr("Go back to the version this one replaced? Your settings and data are not "
+               "changed."),
+            QtCommon::Frontend::Yes | QtCommon::Frontend::No);
+        if (answer != QtCommon::Frontend::Yes) {
+            return;
+        }
+#ifdef __linux__
+        const UpdateInstaller::Lock lock{UpdateInstaller::LockPath(previous)};
+        std::error_code ec;
+        if (!lock.Held()) {
+            ec = std::make_error_code(std::errc::device_or_resource_busy);
+        }
+        if (!lock.Held() || !UpdateInstaller::Rollback(previous, ec)) {
+            LOG_ERROR(Frontend, "Could not restore the previous version: {}", ec.message());
+            QtCommon::Frontend::Critical(tr("Failed to restore"),
+                                         tr("Could not restore the previous version: %1")
+                                             .arg(QString::fromStdString(ec.message())));
+            return;
+        }
+        LOG_INFO(Frontend, "Restored the previous version of {}", previous.string());
+        UpdateDialog::Restart(this, QString::fromStdString(previous.string()));
+#else
+        UpdateDialog::LaunchInstaller(this, QString::fromStdWString(previous.wstring()));
+#endif
+    });
+#endif
 }
 
 void MainWindow::UpdateMenuState() {
@@ -1926,6 +2007,14 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                                     "converted."));
         return;
     }
+    if (shader_warm_dialog && shader_warm_dialog->IsRunning()) {
+        QMessageBox::information(this, tr("Shader Precache in Progress"),
+                                 tr("Games cannot be started while the shader precache is being "
+                                    "built. Wait for it to finish or cancel it."));
+        shader_warm_dialog->raise();
+        shader_warm_dialog->activateWindow();
+        return;
+    }
     if (boot_in_progress || close_pending) {
         return;
     }
@@ -2007,6 +2096,7 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
         Settings::UpdateGPUAccuracy();
         LOG_INFO(Config, "Applied recommended MKW settings after per-game configuration");
     }
+    PrepareShaderPrecache(title_id, std::filesystem::path{filename.toStdU16String()});
     Settings::LogSettings();
 
     if (UISettings::values.select_user_on_boot && !user_flag_cmd_line) {
@@ -2194,6 +2284,10 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     }
     status_bar_update_timer.start(500);
     renderer_status_button->setDisabled(true);
+    frame_gen_status_button->setDisabled(true);
+    frame_gen_state = VideoCore::FrameGenState::Pending;
+    frame_gen_frames = 0;
+    frame_gen_generating = false;
     refresh_button->setDisabled(true);
     SetFPSSuffix();
 
@@ -2412,6 +2506,7 @@ void MainWindow::OnEmulationStopped() {
     game_fps_label->setVisible(false);
     emu_frametime_label->setVisible(false);
     renderer_status_button->setEnabled(!UISettings::values.has_broken_vulkan);
+    frame_gen_status_button->setEnabled(true);
     refresh_button->setEnabled(true);
 
     if (!firmware_label->text().isEmpty()) {
@@ -4316,6 +4411,132 @@ void MainWindow::OnGameListConvertToNup(const std::string& game_path) {
     }));
 }
 
+namespace {
+/// The game's title as its loader reports it, else the file name without extension.
+QString GameTitleName(const std::string& game_path) {
+    if (const auto loader = Loader::GetLoader(
+            *QtCommon::system, QtCommon::vfs->OpenFile(game_path, FileSys::OpenMode::Read))) {
+        std::string title;
+        if (loader->ReadTitle(title) == Loader::ResultStatus::Success) {
+            return QString::fromStdString(title);
+        }
+    }
+    return QFileInfo(QString::fromStdString(game_path)).completeBaseName();
+}
+} // namespace
+
+/// Opens the shader precache dialog for the game and starts the build, or brings a running one to
+/// the front. Refused while a game runs or while this game is being converted.
+void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& game_path) {
+    if (shader_warm_dialog) {
+        if (shader_warm_dialog->IsRunning()) {
+            shader_warm_dialog->raise();
+            shader_warm_dialog->activateWindow();
+            return;
+        }
+        shader_warm_dialog->close();
+    }
+    if (QtCommon::emu_thread != nullptr) {
+        QMessageBox::information(this, tr("Precache Shaders"),
+                                 tr("Close the running game first."));
+        return;
+    }
+    if (nup_running && game_path == nup_source_path) {
+        QMessageBox::information(this, tr("Precache Shaders"),
+                                 tr("This game is being converted. Try again when it is done."));
+        return;
+    }
+
+    const auto path = std::filesystem::path{std::u8string{game_path.begin(), game_path.end()}};
+    shader_warm_dialog =
+        new ShaderWarmDialog(*QtCommon::system, path, program_id, GameTitleName(game_path), this);
+    connect(shader_warm_dialog, &QDialog::finished, shader_warm_dialog, &QObject::deleteLater);
+    shader_warm_dialog->show();
+    shader_warm_dialog->Start();
+}
+
+/// With precache_shaders on: a title precached before is precached again only when the driver or
+/// its precache file changed (the renderer checks). For one never precached, Ask asks whether to
+/// precache before the game starts, and a title without a precache file gets one built from its
+/// game files first. A stopped or failed build starts the game without precaching.
+void MainWindow::PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path) {
+    namespace ShaderWarm = VideoCommon::ShaderWarm;
+    ShaderWarm::RequestWarmBeforeStart(false);
+    const auto mode = Settings::values.precache_shaders.GetValue();
+    // The precache runs where the disk shader cache loads.
+    if (title_id == 0 || mode == Settings::PrecacheShaders::Off ||
+        !Settings::values.use_disk_shader_cache.GetValue()) {
+        return;
+    }
+    if (!ShaderWarm::WarmPending(title_id)) {
+        // Precached before: the renderer runs it again only when the driver or the file changed.
+        ShaderWarm::RequestWarmBeforeStart(true);
+        return;
+    }
+    if (mode == Settings::PrecacheShaders::Ask) {
+        QMessageBox box(QMessageBox::Question, tr("Precache Shaders"),
+                        tr("The shaders of this game are not precached yet. Precache them now?\n\n"
+                           "The game starts when they are done. The first time, the game files "
+                           "are read and their shaders are built on every CPU thread, with the "
+                           "shaders earlier play sessions saved, which takes a few minutes. Later "
+                           "launches only build what is new, until the GPU driver changes. The "
+                           "loading screen has a Skip button.\n\n"
+                           "You can change this in Configure, Graphics, Advanced."),
+                        QMessageBox::NoButton, this);
+        QPushButton* const precache = box.addButton(tr("Precache now"), QMessageBox::AcceptRole);
+        box.addButton(tr("Start without"), QMessageBox::RejectRole);
+        box.setDefaultButton(precache);
+        box.exec();
+        const bool now = box.clickedButton() == precache;
+        LOG_INFO(Frontend, "Shader precache before the game starts: {}", now ? "yes" : "no");
+        if (!now) {
+            return;
+        }
+    }
+    std::error_code ec;
+    if (!std::filesystem::exists(ShaderWarm::ComputeWarmPath(title_id), ec)) {
+        ShaderWarmDialog dialog(*QtCommon::system, game_path, title_id,
+                                GameTitleName(Common::FS::PathToUTF8String(game_path)), this);
+        connect(&dialog, &ShaderWarmDialog::BuildFinished, &dialog, [&dialog](bool ok) {
+            if (ok) {
+                dialog.accept();
+            }
+        });
+        dialog.Start();
+        dialog.exec();
+        if (!std::filesystem::exists(ShaderWarm::ComputeWarmPath(title_id), ec)) {
+            return;
+        }
+    }
+    ShaderWarm::RequestWarmBeforeStart(true);
+}
+
+/// Deletes the game's precache files after a confirmation, showing the error when it fails.
+void MainWindow::OnGameListDeleteShaderWarm(u64 program_id) {
+    if (shader_warm_dialog && shader_warm_dialog->IsRunning() &&
+        shader_warm_dialog->TitleId() == program_id) {
+        // The builder writes this title's files: deleting them under it would lose the result or
+        // fail it. Other titles' files are in their own folders.
+        QMessageBox::information(this, tr("Delete Shader Precache"),
+                                 tr("Shaders are being precached. Try again when it is done."));
+        shader_warm_dialog->raise();
+        shader_warm_dialog->activateWindow();
+        return;
+    }
+    if (QMessageBox::question(this, tr("Delete Shader Precache"),
+                              tr("Delete the shader precache files of this game? They are built "
+                                 "again the next time the game is precached."),
+                              QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+    std::string error;
+    if (!DeleteShaderWarmFiles(program_id, error)) {
+        QMessageBox::critical(this, tr("Delete Shader Precache"),
+                              tr("The files could not be deleted: %1")
+                                  .arg(QString::fromStdString(error)));
+    }
+}
+
 void MainWindow::OnGameListExtractNup(const std::string& game_path) {
     if (nup_running) {
         return;
@@ -4642,12 +4863,43 @@ void MainWindow::OnCaptureScreenshot() {
 
 #ifdef ENABLE_UPDATE_CHECKER
 void MainWindow::OnEmulatorUpdateAvailable() {
-    std::optional<Common::Net::Release> version = update_future.result();
-    if (!version)
+    const auto result = update_future.result();
+    if (result.failure == UpdateChecker::Failure::RateLimited) {
+        statusBar()->showMessage(
+            tr("Could not check for updates: GitHub rate limit reached. Lichii will try again at "
+               "the next start."),
+            15000);
         return;
+    }
+    if (result.failure == UpdateChecker::Failure::Http) {
+        statusBar()->showMessage(
+            tr("Could not check for updates: GitHub answered with HTTP %1.").arg(result.status),
+            15000);
+        return;
+    }
+    if (!result.update) {
+        return;
+    }
 
-    UpdateDialog dialog(version.value(), this);
-    dialog.exec();
+    const auto& release = *result.update;
+    const auto now = static_cast<unsigned long long>(QDateTime::currentSecsSinceEpoch());
+    if (UISettings::values.skipped_update_tag.GetValue() == release.tag ||
+        UISettings::values.update_remind_at.GetValue() > now) {
+        return;
+    }
+
+    UpdateDialog dialog(release, this);
+    switch (dialog.exec()) {
+    case UpdateDialog::SkipVersion:
+        UISettings::values.skipped_update_tag = release.tag;
+        break;
+    case QDialog::Rejected:
+        UISettings::values.update_remind_at = now + 24 * 60 * 60;
+        break;
+    default:
+        return;
+    }
+    OnSaveConfig();
 }
 #endif
 
@@ -4814,6 +5066,12 @@ void MainWindow::UpdateStatusBar() {
 
     emu_frametime_label->setText(tr("Frame: %1 ms").arg(results.frametime * 1000.0, 0, 'f', 2));
 
+    const auto frame_gen = QtCommon::system->GPU().Renderer().GetFrameGenStatus();
+    frame_gen_generating = frame_gen.generated_frames > frame_gen_frames;
+    frame_gen_frames = frame_gen.generated_frames;
+    frame_gen_state = frame_gen.state;
+    UpdateFrameGenButton();
+
     res_scale_label->setVisible(true);
     emu_speed_label->setVisible(!Settings::values.use_multi_core.GetValue());
     game_fps_label->setVisible(true);
@@ -4877,6 +5135,87 @@ void MainWindow::UpdatePostShaderText() {
 }
 #endif
 
+void MainWindow::UpdateFrameGenButton() {
+    const bool enabled = Settings::values.frame_gen.GetValue();
+    frame_gen_status_button->setChecked(enabled);
+    if (!enabled) {
+        frame_gen_status_button->setText(tr("NO FG"));
+        frame_gen_status_button->setToolTip(tr("Frame generation is off."));
+        return;
+    }
+
+    const QString type = ConfigurationShared::frame_gen_type_texts_map
+                             .find(Settings::values.frame_gen_type.GetValue())
+                             ->second.toUpper();
+    const u32 target_rate = Settings::values.frame_gen_target_rate.GetValue();
+    const QString mode = target_rate == 0
+                             ? tr("FG %1 %2X").arg(type).arg(Settings::FrameGenMultiplier())
+                             : tr("FG %1 AUTO").arg(type);
+    const QString target = target_rate == 0
+                               ? QString()
+                               : tr(" It adds up to %1 frames per game frame to reach %2 FPS.")
+                                     .arg(Settings::MAX_FRAME_GEN_MULTIPLIER - 1)
+                                     .arg(target_rate);
+
+    if (!emulation_running) {
+        frame_gen_status_button->setText(mode);
+        frame_gen_status_button->setToolTip(
+            tr("Frame generation is on.%1 Whether it runs shows here once a game starts.")
+                .arg(target));
+        return;
+    }
+
+    QString unavailable;
+    switch (frame_gen_state) {
+    case VideoCore::FrameGenState::Pending:
+    case VideoCore::FrameGenState::Running:
+        break;
+    case VideoCore::FrameGenState::UnsupportedRenderer:
+        unavailable = tr("Frame generation needs the Vulkan renderer.");
+        break;
+    case VideoCore::FrameGenState::UnsupportedBuild:
+        unavailable = tr("This build was compiled without frame generation.");
+        break;
+    case VideoCore::FrameGenState::UnsupportedGpu:
+        unavailable = tr("This GPU lacks Vulkan features LSFG needs (Vulkan memory model, null "
+                         "descriptors and 16-bit floats). The Optical Flow type may still work.");
+        break;
+    case VideoCore::FrameGenState::UnsupportedSurface:
+        unavailable = tr("This GPU can't write to the window's swapchain format from a shader, so "
+                         "generated frames can't be presented.");
+        break;
+    case VideoCore::FrameGenState::MissingLosslessDll:
+        unavailable = tr("LSFG needs Lossless.dll from Lossless Scaling in the \"lossless\" folder "
+                         "of the user directory. It is missing or could not be loaded.");
+        break;
+    }
+
+    if (!unavailable.isEmpty()) {
+        frame_gen_status_button->setChecked(false);
+        frame_gen_status_button->setText(tr("FG UNAVAILABLE"));
+        frame_gen_status_button->setToolTip(
+            tr("Frame generation is on but not running. %1").arg(unavailable));
+        return;
+    }
+
+    if (frame_gen_generating) {
+        frame_gen_status_button->setText(mode);
+        frame_gen_status_button->setToolTip(tr("Frame generation is running.%1").arg(target));
+        return;
+    }
+
+    const QString target_met =
+        target_rate == 0
+            ? QString()
+            : tr(" It also pauses while the game already reaches %1 FPS.").arg(target_rate);
+    frame_gen_status_button->setText(tr("%1 (IDLE)").arg(mode));
+    frame_gen_status_button->setToolTip(
+        tr("Frame generation is on but generated no frames in the last half second. It pauses "
+           "while it warms up, for a second after a frame takes longer than 100 ms, and while "
+           "frames arrive in bursts.%1")
+            .arg(target_met));
+}
+
 void MainWindow::UpdateVolumeUI() {
     const auto volume_value = static_cast<int>(Settings::values.volume.GetValue());
     volume_slider->setValue(volume_value);
@@ -4897,6 +5236,7 @@ void MainWindow::UpdateStatusButtons() {
     UpdateDockedButton();
     UpdateFilterText();
     UpdateAAText();
+    UpdateFrameGenButton();
     UpdateVolumeUI();
 }
 

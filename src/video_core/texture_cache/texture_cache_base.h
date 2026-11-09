@@ -46,6 +46,8 @@
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view_base.h"
 #include "video_core/texture_cache/render_targets.h"
+#include "video_core/texture_cache/sampled_views.h"
+#include "video_core/texture_cache/stale_pages.h"
 #include "video_core/texture_cache/types.h"
 #include "video_core/textures/texture.h"
 #include "video_core/textures/unswizzle_worker.h"
@@ -67,6 +69,40 @@ struct ImageViewInOut {
     u32 index{};
     bool blacklist{};
     ImageViewId id{};
+};
+
+/// A texture handle word a draw read, and where.
+struct TextureHandleRead {
+    GPUVAddr address{};
+    u32 raw{};
+};
+
+/// What a draw's sampled textures were resolved from, kept by the pipeline that drew them. The
+/// next draw with the same pipeline resolves its textures from it (ResolveMemoizedTextures) while
+/// every byte they came from is the same: the handle words, the texture and sampler descriptors
+/// and the tables, mappings and views behind them.
+struct SampledTextureMemo {
+    struct Entry {
+        GPUVAddr handle_address{};
+        const u8* handle_host{}; ///< The handle word in host memory
+        const u8* tic_host{};
+        const u8* tsc_host{};
+        TICEntry tic{};
+        TSCEntry tsc{};
+        u32 raw{};        ///< The handle word
+        u32 view_index{}; ///< The texture header index the handle gives
+        ImageViewId view{};
+        SamplerId sampler{};
+    };
+    std::vector<Entry> entries;
+    const void* memory{};      ///< The address space the pointers belong to
+    const void* image_table{}; ///< The channel's table the views were read from
+    u64 host_serial{};         ///< MemoryManager::HostPointerSerial
+    u64 image_changes{};       ///< DescriptorTable::changes of both tables
+    u64 sampler_changes{};
+    bool via_header_index{}; ///< The sampler binding the handles were split with
+    bool valid{};
+    u32 misses{}; ///< Draws in a row that did not find the memo good
 };
 
 struct AsyncDecodeContext {
@@ -239,16 +275,44 @@ public:
     /// Get the imageview from the graphics descriptor table in the specified index
     [[nodiscard]] ImageView& GetImageView(u32 index) noexcept;
 
+    // Publish the CPU-readable collision image. Caller holds the cache mutex.
+    bool PublishComputeCollisionImage(u32 index);
+
     /// Mark an image as modified from the GPU
     void MarkModification(ImageId id) noexcept;
 
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
+    /// Fills views and samplers of a draw from the pipeline's memo when nothing they were
+    /// resolved from has changed since (true), prepares the images as FillImageViews does.
+    /// handle_addresses are where the draw reads its texture handles from, in binding order.
+    [[nodiscard]] bool ResolveMemoizedTextures(SampledTextureMemo& memo,
+                                               std::span<const GPUVAddr> handle_addresses,
+                                               std::span<ImageViewInOut> views,
+                                               std::span<SamplerId> samplers);
+
+    /// Keeps what FillImageViews and GetSamplerId resolved the draw's textures from.
+    void MemoizeTextures(SampledTextureMemo& memo, std::span<const TextureHandleRead> reads,
+                         std::span<const ImageViewInOut> views, std::span<const SamplerId> samplers);
+
     /// Handle feedback loops during draws.
     void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
 
     [[nodiscard]] bool SamplesRenderTarget(std::span<const ImageViewInOut> views);
+
+    /// Whether sampling the views now needs PrepareImageView: an image with an upload pending or
+    /// a newer alias to copy in (fast draw delta draws keep their views and prepare none).
+    [[nodiscard]] bool SampledViewsChange(std::span<const ImageViewInOut> views) const noexcept {
+        return VideoCommon::SampledViewsChange(views, slot_image_views, slot_images);
+    }
+
+    /// EDEN_NX2_TEXTURE_MEMO_VERIFY: PrepareImage adds the images it is asked to prepare to `log`
+    /// (nullptr stops it) and, with `dry`, does nothing else.
+    void LogPrepares(std::vector<ImageId>* log, bool dry) noexcept {
+        prepare_log = log;
+        prepare_log_dry = dry;
+    }
 
     /// Get the sampler from the graphics/compute descriptor table in the specified index
     Sampler* GetSampler(u32 index, bool compute);
@@ -280,6 +344,16 @@ public:
     [[nodiscard]] const RenderTargets& GetRenderTargets() const noexcept {
         return render_targets;
     }
+
+    /// A clear of the bound render targets (UpdateRenderTargets(true) first): records the frame
+    /// on the images it fully clears.
+    void NoteRenderTargetsCleared(bool color, bool depth);
+
+    /// Whether the bound render targets are redrawn every frame (all fully cleared in this frame
+    /// and the one before), so a draw into them may be skipped once: 0 when they are, 1 none bound,
+    /// 2 one was not fully cleared in this frame, 3 one was cleared in this frame but not the one
+    /// before (for the runtime pipeline log).
+    [[nodiscard]] int RenderTargetsRedrawnReason();
 
     /// Mark images in a range as modified from the CPU
     void WriteMemory(DAddr cpu_addr, size_t size);
@@ -470,6 +544,9 @@ private:
     /// Unregister image from the page table
     void UnregisterImage(ImageId image);
 
+    /// Logs where UnregisterImage's image was registered when one of its pages is missing.
+    void ReportMissingImagePage(ImageId image_id, const Image& image, u64 page);
+
     /// Track CPU reads and writes for image
     void TrackImage(ImageBase& image, ImageId image_id);
 
@@ -567,21 +644,13 @@ private:
     /// guest memory stale (the GPU's data is gone). Its whole pages are marked here and kept
     /// tracked, so CPU writes, unmaps and write-backs clear them. An image made entirely on marked
     /// pages starts without an upload: the upload would only copy stale bytes the GPU overwrites.
+    /// Switch 2 titles only: the buffer cache feeds Nx2MayBeGpuWritten for them alone.
     void MarkStale(const ImageBase& image);
     void ClearStale(DAddr addr, size_t size);
     void ClearStaleImage(const ImageBase& image);
     /// Clears every device range [gpu_addr, gpu_addr + size) maps to.
     void ClearStaleGpu(GPUVAddr gpu_addr, size_t size);
-    [[nodiscard]] bool IsAllStale(DAddr addr, size_t size) const;
-    void UpdateStaleTracking(u64 run_begin, u64 run_pages, s32 delta);
-    bool tc_skip_stale{[] {
-        const char* value = std::getenv("EDEN_NX2_TC_SKIP_STALE");
-        return value == nullptr || value[0] != '0'; // EDEN_NX2_TC_SKIP_STALE=0: off
-    }()};
-    /// Device memory pages (Core::Memory::YUZU_PAGEBITS), not this cache's 1 MiB lookup pages.
-    static constexpr u64 STALE_PAGE_BITS = 12;
-    std::vector<u64> stale_bits; ///< One bit per device page
-    u64 stale_page_count{};
+    StalePages stale_pages;
     u64 tc_stale_skips{};        ///< Uploads skipped (last 600 frames)
     u64 tc_stale_skip_bytes{};
     u64 tc_stale_gpu_written{};  ///< Stale but buffer-written pages: uploaded after all
@@ -590,6 +659,8 @@ private:
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
     bool has_deleted_images = false;
+    std::vector<ImageId>* prepare_log{}; ///< LogPrepares
+    bool prepare_log_dry{};
     /// True while a clear binds its render targets (UpdateRenderTargets(true)), so JoinImages can
     /// skip the upload of a new target the clear overwrites whole.
     bool clearing_render_targets = false;

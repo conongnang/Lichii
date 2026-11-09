@@ -39,6 +39,7 @@
 #include "video_core/gpu.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2.h"
 #include "video_core/rasterizer_download_area.h"
 
 namespace Core::Memory {
@@ -1001,9 +1002,15 @@ struct Memory::Impl {
             // It is often the case the games like to access wildly different addresses. Hence why I propose
             // we should let the compiler just do it's thing...
             if (current_area.last_address != subaddress) {
+                // Switch 2 titles: collected without asking OnCPUWrite under both caches'
+                // mutexes, which the split's back holds through each draw; the back applies
+                // collected writes to both caches at its next FlushCaching, before each draw
+                // (from Frizti's Fritchii: Ocarina of Time +1 fps, walk hitches 5 -> 2 of 6).
+                const bool collect_unasked = address != 0 && size != 0 &&
+                                             Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
                 // Short circuit the need to check for address/size
-                auto const do_collection = (address != 0 && size != 0)
-                    && system.GPU().OnCPUWrite(address, size);
+                auto const do_collection = collect_unasked || ((address != 0 && size != 0)
+                    && system.GPU().OnCPUWrite(address, size));
                 if (do_collection) {
                     current_area.last_address = subaddress;
                 } else {

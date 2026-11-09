@@ -334,3 +334,13 @@ TEST_CASE("A store left global between pointers makes every written buffer unbou
     REQUIRE(fixture.program.info.native_global_bounds);
     CHECK_FALSE(fixture.Run(0x170).write_extent.bounded);
 }
+
+TEST_CASE("Offsets whose constant wraps below zero are unbounded", "[shader][storage_extent]") {
+    // ((tid.x - 0x40000000) << 2) + 0x2000 is 0x2000 + 4 * tid.x modulo 2^32
+    KernelProgram fixture;
+    IR::IREmitter ir{fixture.entry};
+    const IR::U32 shifted{ir.ShiftLeftLogical(
+        ir.ISub(ir.LocalInvocationIdX(), ir.Imm32(0x40000000)), ir.Imm32(2))};
+    ir.WriteGlobal32(Address(ir, 0x170, ir.IAdd(shifted, ir.Imm32(0x2000))), ir.Imm32(0));
+    CHECK_FALSE(fixture.Run(0x170).write_extent.bounded);
+}

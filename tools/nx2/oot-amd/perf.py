@@ -103,7 +103,14 @@ def read_png(path):
 
 def screen():
     path = os.path.join(OUT, "_probe.png")
-    call("screenshot", out=path, timeout=30)
+    for attempt in range(12):  # a cold shader cache can stall presents for many seconds
+        try:
+            call("screenshot", out=path, timeout=30)
+            break
+        except RuntimeError as e:
+            if "no frame was presented" not in str(e) or attempt == 11:
+                raise
+            time.sleep(2)
     w, h, ch, rows = read_png(path)
     return lambda x, y: tuple(rows[y * h // 720][(x * w // 1280) * ch:(x * w // 1280) * ch + 3])
 
@@ -152,7 +159,8 @@ def load_save(slot):
         if on_save_list(px):
             break
         if in_gameplay(px):
-            sys.exit("already in gameplay; restart with --kill")
+            print("booted into gameplay (the game resumed its last spot); measuring there")
+            return
         press("A", 1.0)
     else:
         sys.exit("never reached the save list")
@@ -180,6 +188,31 @@ def load_save(slot):
     sys.exit("the save did not load")
 
 
+# Walk, pan the camera, walk a bit more, pan, stop: about 5 s at 60 fps. Only the first seconds
+# after the start spot show the same scene run to run (NPCs and Link's path drift later), so keep
+# it short and use --walk 1.
+WALK_ROUTE = [
+    {"left_stick": [0, 1], "frames": 90},
+    {"right_stick": [1, 0], "frames": 60},
+    {"left_stick": [0, 1], "frames": 60},
+    {"right_stick": [-1, 0], "frames": 60},
+    {"frames": 20},
+]
+
+
+def walk(times):
+    """Plays WALK_ROUTE `times` times, then reads the presents of that whole span (frame_times
+    `past`; the debug server answers one request at a time). Hitches: intervals over 50 ms."""
+    started = time.time()
+    for _ in range(times):
+        call("input_sequence", {"steps": WALK_ROUTE, "timeout_s": 600}, timeout=660)
+    seconds = time.time() - started
+    ft = call("frame_times", {"past": seconds}, timeout=60)
+    return {"seconds": round(seconds, 1), "frames": ft["frames"], "fps": round(ft["fps"], 1),
+            "hitches": ft["hitches"], "hitch_ms": ft["hitch_ms"], "max_ms": round(ft["max_ms"], 1),
+            "worst": ft["worst_ms"], "truncated": ft["truncated"]}
+
+
 def git_rev():
     r = subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
     dirty = subprocess.run(["git", "-C", REPO, "status", "--porcelain", "-uno"], capture_output=True, text=True)
@@ -202,13 +235,22 @@ def run(a):
         launch(env, a.exe, a.kill, a.affinity)
         summary_scene = load_save(a.slot)
     time.sleep(a.settle)
-    samples = [round(call("status", {"fps_window_ms": 5000}, timeout=30)["fps"], 2) for _ in range(a.measure)]
+    walk_stats = walk(a.walk) if a.walk else None
+    samples = [round(call("status", {"fps_window_ms": 5000}, timeout=30)["fps"], 2) for _ in range(a.measure)] or [0.0]
+    if a.frametimes:
+        ft = call("frame_times", {"seconds": a.frametimes}, timeout=a.frametimes + 30)
+        frame_stats = {k: round(ft[k], 2) for k in ("fps", "p50_ms", "p90_ms", "p99_ms", "max_ms")}
+        frame_stats["stutters"] = ft["stutters"]
     status = call("status", {"fps_window_ms": 0}, timeout=10)
     call("screenshot", out=os.path.join(d, "shot.png"), timeout=30)
     summary = {"scene_diff": None if summary_scene is None else round(summary_scene, 1), "name": a.name, "time": datetime.datetime.now().isoformat(timespec="seconds"),
                "rev": git_rev(), "build": status.get("build"), "env": env, "fps": samples,
                "fps_mean": round(statistics.mean(samples), 2), "fps_min": min(samples),
                "fps_max": max(samples)}
+    if a.frametimes:
+        summary["frames"] = frame_stats
+    if walk_stats:
+        summary["walk"] = walk_stats
     if a.profile:
         lines = call("log_tail", {"contains": "per second", "limit": 4}, timeout=10)["lines"]
         summary["profile"] = lines
@@ -238,6 +280,8 @@ def run(a):
             f.write("time\tname\trev\tmean\tmin\tmax\tenv\n")
         extra = " ".join(f"{k}={v}" for k, v in env.items() if k != "EDEN_NX2_DEBUG_SERVER")
         extra += f" affinity={a.affinity}" if a.affinity else ""
+        if a.frametimes:
+            extra += " p99={p99_ms}ms max={max_ms}ms stutters={stutters}".format(**frame_stats)
         f.write(f"{summary['time']}\t{a.name}\t{summary['rev']}\t{summary['fps_mean']}\t"
                 f"{summary['fps_min']}\t{summary['fps_max']}\t{extra}\n")
     print(json.dumps({k: v for k, v in summary.items() if k != "profile"}, indent=1))
@@ -257,6 +301,11 @@ def main():
                    help="save the log lines containing this text (e.g. 'DKB gpu_frame'), repeatable")
     r.add_argument("--measure", type=int, default=6, help="number of 5 s fps windows")
     r.add_argument("--settle", type=float, default=10)
+    r.add_argument("--walk", type=int, default=0,
+                   help="play the scripted route this many times right after loading and report its "
+                        "hitches (frames over 50 ms) from the present intervals")
+    r.add_argument("--frametimes", type=float, default=0,
+                   help="seconds of present intervals to summarise (p50/p90/p99/max, stutters)")
     r.add_argument("--exe", default=os.environ.get("LICHII_EXE", "lichii.exe"))
     r.add_argument("--affinity", help="hex CPU mask for the process (e.g. ffff = the first CCD of a 16-core Ryzen, SMT included)")
     r.add_argument("--slot", type=int, default=int(os.environ.get("OOT_SLOT", "1")),

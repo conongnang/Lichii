@@ -287,6 +287,9 @@ private:
     /// EDEN_NX2_AUDIO_LEVEL meter state.
     s32 level_peak{};
     u64 level_frames{};
+    u64 level_underrun_frames{}; ///< Frames filled without guest samples (EDEN_NX2_AUDIO_LEVEL)
+    u64 level_underruns{};
+    u64 level_queued_min{~u64{0}};
     /// Number of buffers waiting to be played
     std::atomic<u32> queued_buffers{};
     /// The ring size for audio out buffers (usually 4, rarely 2 or 8)

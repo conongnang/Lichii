@@ -211,6 +211,21 @@ json Status(ToolState& state, const json& params) {
 json FrameTimes(ToolState& state, const json& params) {
     const double seconds = params.value("seconds", 5.0);
     const double refresh_hz = params.value("refresh_hz", 60.0);
+    // past: the last `past` seconds of presents already made, without waiting (the ring keeps
+    // the last 4096).
+    if (const double past = params.value("past", 0.0); past > 0.0) {
+        if (!std::isfinite(past) || past > 600.0) {
+            throw std::runtime_error{"past must be > 0 and <= 600"};
+        }
+        const u64 after = g_nx2_present_count.load(std::memory_order_relaxed);
+        const u64 capacity = g_nx2_present_times_ns.size();
+        const auto now = std::chrono::steady_clock::now();
+        const u64 end_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        const u64 begin_ns = end_ns - static_cast<u64>(past * 1e9);
+        return ReadFrameTimes(after > capacity - 1 ? after - (capacity - 1) : 0, after, begin_ns,
+                              end_ns, refresh_hz);
+    }
     if (!std::isfinite(seconds) || seconds <= 0.0 || seconds > 60.0 ||
         !std::isfinite(refresh_hz) || refresh_hz <= 0.0) {
         throw std::runtime_error{"seconds must be > 0 and <= 60; refresh_hz must be > 0"};
@@ -278,6 +293,17 @@ json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refr
     const double median = percentile(0.5);
     std::array<size_t, 4> buckets{};
     size_t stutters = 0;
+    // Hitches: intervals over 50 ms, over the whole window (intervals_ms keeps only the last 120).
+    size_t hitches = 0;
+    double hitch_ms = 0.0;
+    json worst = json::array();
+    for (size_t i = frames; i-- > 0 && intervals[i] > 50.0;) {
+        ++hitches;
+        hitch_ms += intervals[i];
+        if (worst.size() < 8) {
+            worst.push_back(std::round(intervals[i]));
+        }
+    }
     for (const double interval : intervals) {
         const double periods = interval * refresh_hz / 1000.0;
         ++buckets[periods < 1.5 ? 0 : periods < 2.5 ? 1 : periods < 3.5 ? 2 : 3];
@@ -296,6 +322,9 @@ json ReadFrameTimes(u64 before, u64 after, u64 begin_ns, u64 end_ns, double refr
             {"min_ms", frames == 0 ? 0.0 : intervals.front()},
             {"vsync_buckets", {{"1", share(0)}, {"2", share(1)}, {"3", share(2)}, {"4+", share(3)}}},
             {"stutters", stutters},
+            {"hitches", hitches},
+            {"hitch_ms", std::round(hitch_ms)},
+            {"worst_ms", std::move(worst)},
             {"intervals_ms", std::move(recent)},
             {"truncated", truncated}};
 }
@@ -486,6 +515,16 @@ json SampleThreads(ToolState& state, const json& params) {
     return {{"file", path.generic_string()}, {"report", std::move(report)}};
 }
 
+// Lifts or restores the speed limit (test scripts boot through the logos and menus unlimited).
+json SpeedLimit(ToolState&, const json& params) {
+    auto& setting = Settings::values.use_speed_limit;
+    const bool previous = setting.GetValue();
+    if (params.contains("on")) {
+        setting.SetValue(params.at("on").get<bool>());
+    }
+    return {{"previous", previous}, {"on", setting.GetValue()}};
+}
+
 json ReadMemory(ToolState& state, const json& params) {
     const u64 address = AddressParam(params, "address");
     const u64 size = ReadSize(params, address);
@@ -499,6 +538,42 @@ json ReadMemory(ToolState& state, const json& params) {
     json result = {{"address", HexAddress(address)}, {"size", size}};
     result.update(FormatMemory(bytes, as));
     return result;
+}
+
+/// Writes guest memory to <dump dir>/<name>.bin in one call, unmapped pages as zeros, so state
+/// can be diffed across a few seconds of play (read_memory takes 64 KiB a call).
+json DumpMemory(ToolState& state, const json& params) {
+    const u64 address = AddressParam(params, "address");
+    const u64 size = params.at("size").get<u64>();
+    if (size == 0 || size > 256 * 1024 * 1024 || address + size < address) {
+        throw std::runtime_error{"size must be 1 byte to 256 MiB"};
+    }
+    const std::string name = params.at("name").get<std::string>();
+    if (name.empty() || name.find_first_of("/\:.") != std::string::npos) {
+        throw std::runtime_error{"name: want a plain file name without extension"};
+    }
+    std::vector<u8> bytes(size);
+    u64 unmapped = 0;
+    auto& memory = Application(state).GetMemory();
+    for (u64 offset = 0; offset < size;) {
+        const u64 current = address + offset;
+        const u64 length = (std::min)(Memory::YUZU_PAGESIZE - (current & Memory::YUZU_PAGEMASK),
+                                      size - offset);
+        if (ReadGuestMemory(memory, current, std::span<u8>{bytes.data() + offset, length})) {
+            std::fill_n(bytes.data() + offset, length, u8{0});
+            unmapped += length;
+        }
+        offset += length;
+    }
+    std::filesystem::create_directories(state.dump_directory);
+    const auto path = state.dump_directory / (name + ".bin");
+    std::ofstream file{path, std::ios::binary};
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(size));
+    if (!file) {
+        throw std::runtime_error{fmt::format("could not write {}", path.generic_string())};
+    }
+    return {{"path", path.generic_string()}, {"address", HexAddress(address)}, {"size", size},
+            {"unmapped_bytes", unmapped}};
 }
 
 json SearchMemory(ToolState& state, const json& params) {
@@ -680,8 +755,10 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"capture_frame", handler(CaptureFrame)},
         {"reject_shaders", handler(RejectShaders)},
         {"sample", handler(SampleThreads)},
+        {"speed_limit", handler(SpeedLimit)},
         {"read_memory", handler(ReadMemory)},
         {"search_memory", handler(SearchMemory)},
+        {"dump_memory", handler(DumpMemory)},
         {"read_gpu_memory", handler(ReadGpuMemory)},
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},

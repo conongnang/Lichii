@@ -93,8 +93,10 @@ void CheckFreshProfile() {
 
 void CheckLegacyProfile() {
     const auto& values = Settings::values;
-    CHECK(values.scaling_filter.GetValue() == Settings::ScalingFilter::ScaleForce);
-    CHECK(values.gpu_accuracy.GetValue() == Settings::GpuAccuracy::High);
+    // The built-in defaults: FSR 1 Soft and Fast GPU accuracy, as the first-run profile seeds.
+    CHECK(values.scaling_filter.GetValue() == Settings::ScalingFilter::Fsr3);
+    CHECK(values.gpu_accuracy.GetValue() == Settings::GpuAccuracy::Low);
+    CHECK(values.use_docked_mode.GetValue() == Settings::ConsoleMode::Docked);
     CHECK(values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Cpu);
     CHECK_FALSE(values.async_presentation.GetValue());
     CHECK_FALSE(values.use_asynchronous_shaders.GetValue());
@@ -169,8 +171,7 @@ TEST_CASE("Absent global config receives the first-run profile and persists it",
                                std::istreambuf_iterator<char>{}};
     REQUIRE(saved.LoadData(contents) >= 0);
     file.close();
-    for (const char* key : {"scaling_filter", "gpu_accuracy", "nvdec_emulation",
-                            "async_presentation", "use_asynchronous_shaders"}) {
+    for (const char* key : {"nvdec_emulation", "async_presentation", "use_asynchronous_shaders"}) {
         CHECK_FALSE(saved.GetBoolValue("Renderer", (std::string{key} + "\\default").c_str(), true));
     }
     const auto filename = config->GetConfigFilePath();
@@ -206,7 +207,7 @@ TEST_CASE("Existing explicit settings survive load save and reopen", "[config]")
     }
 }
 
-TEST_CASE("Existing default markers and missing keys keep their historical values", "[config]") {
+TEST_CASE("Existing default markers and missing keys take the built-in defaults", "[config]") {
     ConfigDirectory directory;
     std::string contents;
     SECTION("Empty existing config") {}
@@ -274,7 +275,7 @@ TEST_CASE("Per-game overrides and use-global flags survive the new global profil
         CHECK(Settings::values.scaling_filter.GetValue() == Settings::ScalingFilter::Bilinear);
         CHECK(Settings::values.scaling_filter.GetValue(true) == Settings::ScalingFilter::Fsr3);
         CHECK_FALSE(Settings::values.gpu_accuracy.UsingGlobal());
-        CHECK(Settings::values.gpu_accuracy.GetValue() == Settings::GpuAccuracy::High);
+        CHECK(Settings::values.gpu_accuracy.GetValue() == Settings::GpuAccuracy::Low);
         CHECK(Settings::values.gpu_accuracy.GetValue(true) == Settings::GpuAccuracy::Low);
         CHECK(Settings::values.nvdec_emulation.UsingGlobal());
         CHECK(Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu);

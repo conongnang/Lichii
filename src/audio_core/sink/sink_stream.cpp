@@ -220,6 +220,8 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
 
             if (!queue.TryPop(playing_buffer)) {
                 lk.unlock();
+                level_underrun_frames += num_frames - frames_written;
+                ++level_underruns;
                 for (size_t i = frames_written; i < num_frames; i++) {
                     if (type == StreamType::Sysmix) {
                         std::memset(&output_buffer[i * frame_size], 0, frame_size_bytes);
@@ -251,16 +253,25 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
     std::memcpy(last_frame.data(), &output_buffer[(frames_written - 1) * frame_size], frame_size_bytes);
 
     // EDEN_NX2_AUDIO_LEVEL: log the output peak about every two seconds (is a game audible?).
+    // Also counts underruns (callbacks that found no guest buffer) and the fewest buffers queued.
     if (static const bool meter = std::getenv("EDEN_NX2_AUDIO_LEVEL") != nullptr;
         meter || type == StreamType::Sysmix) {
         for (size_t i = 0; i < num_frames * frame_size; ++i) {
             level_peak = std::max<s32>(level_peak, std::abs(static_cast<s32>(output_buffer[i])));
         }
+        level_queued_min = std::min<u64>(level_queued_min, queued_buffers.load());
         level_frames += num_frames;
         if (level_frames >= TargetSampleRate * 2) {
-            LOG_INFO(Audio, "Audio output peak over {} frames: {} of 32767", level_frames, level_peak);
+            LOG_INFO(Audio,
+                     "Audio output {} over {} frames: peak {} of 32767, {} underruns ({} frames), "
+                     "min queued {}",
+                     name, level_frames, level_peak, level_underruns, level_underrun_frames,
+                     level_queued_min);
             level_frames = 0;
             level_peak = 0;
+            level_underruns = 0;
+            level_underrun_frames = 0;
+            level_queued_min = ~u64{0};
         }
     }
 

@@ -24,6 +24,7 @@
 #include "shader_recompiler/object_pool.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dirty_flags.h"
+#include "video_core/nx2_fast_draw.h"
 #include "video_core/dlss_contract.h"
 #include "video_core/fire_emblem_upscale.h"
 #include "video_core/engines/kepler_compute.h"
@@ -31,11 +32,39 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/pipeline_cache_policy.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/util.h"
 
 namespace VideoCommon {
+
+u64 VertexAttributeMaskOf(const Shader::Environment& env) {
+    static const bool key_all = [] {
+        const char* value = std::getenv("EDEN_NX2_KEY_ALL_ATTRIBUTES");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (key_all) {
+        return ~u64{0};
+    }
+    const Shader::Stage stage{env.ShaderStage()};
+    if (stage == Shader::Stage::Task || stage == Shader::Stage::Mesh) {
+        // No vertex input (Ocarina of Time: 191 keys for 31 sets of shaders, split only by the
+        // attribute registers).
+        return 0;
+    }
+    if (stage != Shader::Stage::VertexB || !env.IsNativeProgram()) {
+        return ~u64{0};
+    }
+    // The hardware only fetches the attributes in the input map, so a read outside it is never
+    // valid (none of Ocarina of Time's 1,250 cached vertex programs makes one).
+    std::array<std::array<bool, 4>, Tegra::Engines::Maxwell3D::Regs::NumVertexAttributes>
+        input_generic{};
+    for (size_t index = 0; index < input_generic.size(); ++index) {
+        input_generic[index] = env.SPH().vtg.InputGeneric(index);
+    }
+    return VertexAttributeMask(input_generic);
+}
 
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
@@ -214,6 +243,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
             }
         }
         shader_infos[index] = shader_info;
+        vertex_attribute_masks[index] = shader_info->vertex_attribute_mask;
         unique_hashes[index] = shader_info->unique_hash;
         if (mesh && (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
                      program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation)) {
@@ -294,6 +324,10 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         DlssContract::IsFastFusionCandidate(program_id,
                                             shader->lowered_native->native_program_key)) {
         kepler_compute->TraceDlssContract(shader->lowered_native->native_program_key);
+    }
+    if (kepler_compute->IsNativeMode() && shader->lowered_native &&
+        kepler_compute->BypassOotNetwork(program_id, shader->lowered_native->native_program_key)) {
+        throw FireEmblemUpscale::DispatchReplaced{};
     }
     if (kepler_compute->IsNativeMode() && shader->lowered_native &&
         kepler_compute->ProcessGameDlss(program_id, shader->lowered_native->native_program_key)) {
@@ -420,6 +454,7 @@ void ShaderCache::RemovePendingShaders() {
     marked_for_removal.clear();
 
     if (!removed_shaders.empty()) {
+        Nx2FastDraw::Break(Nx2FastDraw::Reason::Invalidation);
         if (removed_shaders.size() > 16) {
             std::ranges::sort(removed_shaders, std::less<ShaderInfo*>{});
             std::erase_if(storage, [&removed_shaders](const std::unique_ptr<ShaderInfo>& shader) {
@@ -495,6 +530,7 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
         info->size_bytes = env.ReadSizeBytes();
     }
     info->lowered_native = env.LoweredNative();
+    info->vertex_attribute_mask = VertexAttributeMaskOf(env);
     const size_t size_bytes{env.SourceSizeBytes() ? env.SourceSizeBytes() : info->size_bytes};
     const ShaderInfo* const result{info.get()};
     Register(std::move(info), cpu_addr, size_bytes);

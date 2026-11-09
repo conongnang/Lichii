@@ -384,13 +384,16 @@ public:
     }
     /// True when it recorded copies, which the GPU completes at `tick` (the caller submits).
     bool Nx2CopyListPages(u64 tick);
-    enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync };
+    enum class Nx2ListRead { Unknown, Copied, Synced, NeedsSync, Pending };
     /// Front thread: Synced when guest memory holds the page `device_addr` lies in (flushed and
     /// written by no GPU work since), else Copied with `out` filled from the copy of its last
     /// write once the GPU is done with it. Unknown otherwise: the caller drains and flushes.
     /// Pages draws write are only Synced or Unknown, and NeedsSync until `past_sync`: the
     /// split's back ran the work before the last host-level wait (GpuSplit::WaitForSync).
-    Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync);
+    /// With `pending_tick`, a copy the GPU has not finished returns Pending and sets the tick
+    /// instead of waiting for it.
+    Nx2ListRead Nx2ReadListCopy(DAddr device_addr, std::span<u8> out, bool past_sync,
+                                u64* pending_tick = nullptr);
     /// Front thread, the split drained: the command list page was flushed to guest memory.
     void Nx2NoteListSynced(DAddr page);
 
@@ -467,6 +470,9 @@ public:
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectCount();
 
     [[nodiscard]] std::pair<Buffer*, u32> GetDrawIndirectBuffer();
+
+    /// Fast draw verify (nx2_fast_draw.h): a hash of the bindings a delta draw keeps.
+    [[nodiscard]] u64 KeptGraphicsBindingsHash(bool vertex, bool storage, bool texture) const;
 
     template <typename Func>
     void BufferOperations(Func&& func) {
@@ -604,6 +610,9 @@ private:
 
     bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
 
+    /// SynchronizeBuffer for vertex buffer slots 0-31 and the index buffer (slot 32).
+    void SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAddr device_addr, u32 size);
+
     void UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                       std::span<BufferCopy> copies);
 
@@ -674,6 +683,22 @@ private:
     u32 stale_vertex_buffers_mask = 0;
     u64 vertex_buffers_serial = 0;
     std::array<Binding, 32> v_buffer{};
+
+    /// The range each geometry slot last scanned for uploads (SynchronizeGeometryBuffer).
+    struct GeometrySync {
+        BufferId buffer_id{};
+        DAddr device_addr{};
+        u32 size{};
+        u64 deletions{};
+    };
+    std::array<GeometrySync, NUM_VERTEX_BUFFERS + 1> geometry_syncs{};
+    /// Counts DeleteBuffer calls: a buffer id older than this count may have been freed or reused.
+    u64 buffer_deletions = 0;
+    struct GeometryStats {
+        u64 syncs{};
+        u64 syncs_skipped{};
+        u64 verify_mismatches{};
+    } geometry_stats;
 
     boost::container::small_vector<BufferCopy, 4> upload_copies;
 

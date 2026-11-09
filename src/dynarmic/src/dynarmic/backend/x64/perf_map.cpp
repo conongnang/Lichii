@@ -78,5 +78,51 @@ void PerfMapClear() {
 }
 
 }  // namespace Dynarmic::Backend::X64
+#elif defined(_WIN32)
+#    include <cstdio>
+#    include <cstdlib>
+#    include <mutex>
 
+namespace Dynarmic::Backend::X64 {
+
+// Windows: EDEN_NX2_JIT_MAP=<file> writes the same "start size name" lines (perf map format), so
+// samples of generated code can be named by guest block (tools/nx2/jit_profile.py).
+namespace {
+std::mutex mutex;
+std::FILE* file = nullptr;
+bool opened = false;
+}  // anonymous namespace
+
+namespace detail {
+void PerfMapRegister(const void* start, const void* end, std::string_view friendly_name) {
+    if (start == end) {
+        return;
+    }
+    std::lock_guard guard{mutex};
+    if (!opened) {
+        opened = true;
+        if (const char* path = std::getenv("EDEN_NX2_JIT_MAP")) {
+            file = std::fopen(path, "w");
+        }
+    }
+    if (!file) {
+        return;
+    }
+    const std::string line = fmt::format("{:016x} {:x} {:s}\n", reinterpret_cast<u64>(start),
+                                         reinterpret_cast<u64>(end) - reinterpret_cast<u64>(start),
+                                         friendly_name);
+    std::fwrite(line.data(), 1, line.size(), file);
+    std::fflush(file);
+}
+}  // namespace detail
+
+void PerfMapClear() {
+    std::lock_guard guard{mutex};
+    if (file) {
+        std::fputs("# clear\n", file);
+        std::fflush(file);
+    }
+}
+
+}  // namespace Dynarmic::Backend::X64
 #endif

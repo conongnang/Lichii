@@ -28,7 +28,13 @@
 // thread logs the counts.
 namespace Tegra::Nx2CmdPageDiag {
 
-inline const bool g_enabled = std::getenv("EDEN_NX2_CMDPAGE_DIAG") != nullptr;
+inline bool g_enabled = std::getenv("EDEN_NX2_CMDPAGE_DIAG") != nullptr;
+
+/// Called by VideoCore::CreateGPU: static initialization runs before the frontend loads
+/// nx2_switches.txt, so a switch set only there takes effect from that point on.
+inline void ReadSwitch() {
+    g_enabled = std::getenv("EDEN_NX2_CMDPAGE_DIAG") != nullptr;
+}
 
 inline constexpr u64 PageBytes = u64{1} << Nx2WrittenPageBits;
 inline constexpr u32 PageWords = static_cast<u32>(PageBytes / sizeof(u32));
@@ -88,6 +94,9 @@ struct State {
     std::atomic<u64> missed_elsewhere{};
     std::atomic<u32> missed_logged{};
     std::atomic<u64> dma_reads{};
+    std::atomic<u64> writer_checks{};  ///< Entries not known GPU-written: the front waits for writers
+    std::atomic<u64> writer_blocked{}; ///< Of those, waits that found writers still queued
+    std::atomic<u64> writer_flipped{}; ///< Of those, entries GPU-written once the writers ran
     std::atomic<u64> dma_reads_gpu_pages{};
     std::atomic<u64> dma_reads_changed{};
     std::atomic<u64> dma_reads_changed_gpu_pages{};
@@ -252,7 +261,8 @@ inline void Log() {
              "{} unknown {} (on draw pages {}) | sync waits {} in {:.1f} ms | missed draw writes "
              "on entry {} elsewhere {} | list page writes draw {} (whole page {}) dispatch/copy "
              "{}; draw-written list pages {} | macro DMA reads {} (on GPU-written pages {}), "
-             "changed by the drain {} (on GPU-written pages {})",
+             "changed by the drain {} (on GPU-written pages {}) | writer checks {} blocked {} "
+             "found written {}",
              seconds, path(Path::Submitted), path(Path::Safe), path(Path::Copy), path(Path::Slow),
              Take(state.slow_drained), Take(state.slow_flushed),
              static_cast<double>(Take(state.slow_ns)) / 1e6, kind_names[0], kinds[0], changed[0],
@@ -264,7 +274,19 @@ inline void Log() {
              Take(state.missed_elsewhere), Take(state.draw_writes),
              Take(state.draw_writes_whole_page), Take(state.other_writes), draw_pages,
              Take(state.dma_reads), Take(state.dma_reads_gpu_pages), Take(state.dma_reads_changed),
-             Take(state.dma_reads_changed_gpu_pages));
+             Take(state.dma_reads_changed_gpu_pages), Take(state.writer_checks),
+             Take(state.writer_blocked), Take(state.writer_flipped));
+}
+
+/// The front waited for the writers before an entry not known to be GPU-written.
+inline void CountWriterCheck(bool blocked, bool flipped) {
+    if (!g_enabled) {
+        return;
+    }
+    State& state = Get();
+    state.writer_checks.fetch_add(1, std::memory_order_relaxed);
+    state.writer_blocked.fetch_add(blocked ? 1 : 0, std::memory_order_relaxed);
+    state.writer_flipped.fetch_add(flipped ? 1 : 0, std::memory_order_relaxed);
 }
 
 /// The front parsed an entry through `path`.

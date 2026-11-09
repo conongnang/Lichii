@@ -51,6 +51,12 @@ struct Patch {
     u32 numeric_version{0};
 };
 
+/// A built-in patch's request to hold the vsync at 60 Hz while a game byte is not free_value.
+struct BuiltinFrameHold {
+    size_t module_offset;
+    u8 free_value;
+};
+
 // A centralized class to manage patches to games.
 class PatchManager {
 public:
@@ -74,6 +80,11 @@ public:
     // - Built-in patches, keyed by title and build id
     [[nodiscard]] std::vector<u8> PatchNSO(const std::vector<u8>& nso,
                                            const std::string& name) const;
+
+    // The frame hold of a built-in patch the last PatchNSO applied, if any.
+    [[nodiscard]] std::optional<BuiltinFrameHold> AppliedFrameHold() const {
+        return applied_hold;
+    }
 
     // Checks to see if PatchNSO() will have any effect given the NSO's build ID.
     // Used to prevent expensive copies in NSO loader.
@@ -120,6 +131,7 @@ private:
     std::optional<u64> parent_title_id;
     const Service::FileSystem::FileSystemController& fs_controller;
     const ContentProvider& content_provider;
+    mutable std::optional<BuiltinFrameHold> applied_hold;
 };
 
 } // namespace FileSys

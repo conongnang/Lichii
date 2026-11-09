@@ -28,6 +28,31 @@ constexpr bool CanDiscardPendingDraw(bool native, bool depth_enabled, u32 index_
     return depth_enabled || (index_count > 6 && vertex_count > 6);
 }
 
+/// How a native draw with an unbuilt pipeline is handled (the native_async_draws setting).
+enum class NativePendingMode { Wait, Bounded, Skip };
+
+/// What to do with a native draw whose pipeline is still building.
+enum class NativeDrawAction {
+    Wait,      ///< Use the pipeline; the draw waits for the build.
+    WaitTimed, ///< Wait for the build up to the remaining budget, then skip if still unbuilt.
+    Skip,      ///< Drop the draw.
+};
+
+/// @param mode           Wait, Bounded or Skip (EDEN_NX2_ASYNC_DISCARD=1 passes Skip).
+/// @param can_discard    The legacy heuristic allows skipping this draw.
+/// @param budget_left_us Microseconds left of this frame's wait budget.
+constexpr NativeDrawAction DecideNativePending(NativePendingMode mode, bool can_discard,
+                                               s64 budget_left_us) {
+    // A draw the heuristic keeps must be waited for whatever the mode is.
+    if (mode == NativePendingMode::Wait || !can_discard) {
+        return NativeDrawAction::Wait;
+    }
+    if (mode == NativePendingMode::Skip || budget_left_us <= 0) {
+        return NativeDrawAction::Skip;
+    }
+    return NativeDrawAction::WaitTimed;
+}
+
 /// Whether a native pipeline's SPIR-V emission is deferred to a worker: only while fewer than
 /// `capacity` emissions are pending.
 constexpr bool DefersShaderEmission(bool native, size_t pending, size_t capacity) {

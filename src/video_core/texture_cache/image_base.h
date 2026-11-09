@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <optional>
 #include <vector>
@@ -117,8 +118,14 @@ struct ImageBase {
     std::vector<std::pair<u64, u64>> dirty_ranges;
     u64 scale_tick = 0;
     bool has_scaled = false;
+    /// Frames (TextureCache frame ticks) of the last two that fully cleared this image as a
+    /// render target: one cleared in both this frame and the one before is redrawn every frame.
+    u64 clear_frame = ~u64{0};
+    u64 previous_clear_frame = ~u64{0};
 
+    /// The channel and GPU address space whose page table RegisterImage put the image in.
     size_t channel = 0;
+    size_t address_space = 0;
 
     ImageFlagBits flags = ImageFlagBits::CpuModified;
 
@@ -126,7 +133,11 @@ struct ImageBase {
     VAddr cpu_addr = 0;
     VAddr cpu_addr_end = 0;
 
+    /// Set through SetModificationTick.
     u64 modification_tick = 0;
+    /// At least the newest modification_tick among aliased_images (raised when an alias's tick is
+    /// set or an alias is added): SynchronizeAliases has nothing to do while it is not newer.
+    u64 newest_alias_tick = 0;
     size_t lru_index = SIZE_MAX;
 
     std::array<u32, MAX_MIP_LEVELS> mip_level_offsets{};
@@ -169,5 +180,15 @@ struct ImageAllocBase {
 };
 
 bool AddImageAlias(ImageBase& lhs, ImageBase& rhs, ImageId lhs_id, ImageId rhs_id);
+
+/// Sets an image's modification tick and raises its aliases' newest_alias_tick to it.
+template <typename Images>
+void SetModificationTick(Images& images, ImageBase& image, u64 tick) {
+    image.modification_tick = tick;
+    for (const AliasedImage& alias : image.aliased_images) {
+        u64& newest = images[alias.id].newest_alias_tick;
+        newest = (std::max)(newest, tick);
+    }
+}
 
 } // namespace VideoCommon

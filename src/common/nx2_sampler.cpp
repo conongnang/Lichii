@@ -254,7 +254,8 @@ std::string Location(DWORD64 address) {
     if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCSTR>(address), &module)) {
-        return "(jit)";
+        // Generated code: the address itself, which EDEN_NX2_JIT_MAP's block map names offline.
+        return fmt::format("jit+{:#x}", address);
     }
     char path[MAX_PATH] = "?";
     GetModuleFileNameA(module, path, sizeof(path));

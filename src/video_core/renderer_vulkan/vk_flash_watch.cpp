@@ -13,6 +13,8 @@
 #include <fmt/format.h>
 
 #include "common/logging.h"
+// Before any Vulkan header: X11 defines Success, which NvResult uses.
+#include "core/hle/service/nvdrv/nvdata.h"
 #include "common/settings.h"
 #include "video_core/host_shaders/vulkan_flash_watch_comp_spv.h"
 #include "video_core/renderer_vulkan/vk_flash_watch.h"

@@ -482,7 +482,7 @@ TEST_CASE("Loaded pointers that compete with a pair do not take the last storage
 
 // The loop reads its records through the table entry at *c0[0x30] or *c0[0x38], loaded before
 // it. That load binds c0[0x30] and c0[0x38] in the first pass, with `pointers` more pointers.
-void EmitTableLoop(KernelProgram& fixture, u32 pointers) {
+static void EmitTableLoop(KernelProgram& fixture, u32 pointers) {
     fixture.env.native = true;
     fixture.entry.AddBranch(&fixture.loop);
     fixture.loop.AddBranch(&fixture.loop);

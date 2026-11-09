@@ -64,6 +64,7 @@ SETTING(std::string, false);
 SETTING(u16, false);
 SWITCHABLE(AnisotropyMode, true);
 SWITCHABLE(AntiAliasing, false);
+SWITCHABLE(OotAntiAliasing, false);
 SWITCHABLE(AspectRatio, true);
 SWITCHABLE(AstcDecodeMode, true);
 SWITCHABLE(AstcRecompression, true);
@@ -360,8 +361,24 @@ struct Values {
                                                   true,
                                                   true};
 
+    // Lichii: caps how often the game's own compositor presents, so the game itself is paced to
+    // this rate instead of only the display. 0 keeps the game's vblank and swap interval.
+    SwitchableSetting<u32, true> fps_limit{linkage,
+                                           0,
+                                           0,
+                                           480,
+                                           "fps_limit",
+                                           Category::Renderer,
+                                           Specialization::Countable,
+                                           true,
+                                           true};
+
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
+#ifdef __ANDROID__
                                                     ScalingFilter::ScaleForce,
+#else
+                                                    ScalingFilter::Fsr3, // FSR 1 Soft
+#endif
                                                     "scaling_filter",
                                                     Category::Renderer,
                                                     Specialization::Default,
@@ -385,6 +402,17 @@ struct Values {
                                                            Specialization::Percentage,
                                                        true,
                                                        true};
+    // Switch 2 VSync event rate. Games start frames on it, so above 60 only games with a
+    // real-time step (e.g. the Ocarina "FPS Unlock" built-in) keep their speed.
+    SwitchableSetting<u16, true> frame_rate_limit{linkage,
+                                                  60,
+                                                  30,
+                                                  240,
+                                                  "nx2_frame_rate_limit",
+                                                  Category::Renderer,
+                                                  Specialization::Scalar,
+                                                  true,
+                                                  false};
     // NVIDIA DLSS (through NVIDIA Streamline) in place of a game's DLSS.
     SwitchableSetting<bool> nvidia_dlss{linkage, false, "nvidia_dlss", Category::Renderer};
     SwitchableSetting<AspectRatio, true> aspect_ratio{linkage,
@@ -402,6 +430,10 @@ struct Values {
                                                   Specialization::Default,
                                                   true,
                                                   true};
+    // The Legend of Zelda: Ocarina of Time's own anti-aliasing network and its sharpening output
+    // pass, or the tonemapped image as the game renders it (video_core/oot_network.h).
+    SwitchableSetting<OotAntiAliasing> oot_anti_aliasing{linkage, OotAntiAliasing::Game,
+                                                         "oot_anti_aliasing", Category::Renderer};
 
     SwitchableSetting<std::string> post_shader_chain{linkage,
                                                      std::string(),
@@ -520,11 +552,7 @@ struct Values {
                                          linkage, 0, "bg_blue", Category::Renderer, Specialization::Default, true, true};
 
     SwitchableSetting<GpuAccuracy, true> gpu_accuracy{linkage,
-#ifdef __ANDROID__
-                                                      GpuAccuracy::Low,
-#else
-                                                      GpuAccuracy::High,
-#endif
+                                                      GpuAccuracy::Low, // Fast
                                                       "gpu_accuracy",
                                                       Category::RendererAdvanced,
                                                       Specialization::Default,
@@ -555,8 +583,7 @@ struct Values {
     // GPU-written. Its pointer carries no size, so the binding is up to 8 MiB; marking all of it
     // defers the CPU's later writes to those pages (Ocarina of Time's white leaves) and has fences
     // copy them back. Auto: the extent the shader's stores provably reach (the whole binding when
-    // unknown). Full: the whole binding (the behaviour before the store extent). Cap64K: at most
-    // 64 KiB.
+    // unknown). Full: the whole binding (the behaviour before the store extent).
     SwitchableSetting<NativeComputeWriteMark, true> native_compute_write_mark{
         linkage,
         NativeComputeWriteMark::Auto,
@@ -622,6 +649,37 @@ struct Values {
     SwitchableSetting<bool> use_vulkan_driver_pipeline_cache{
         linkage, true, "use_vulkan_driver_pipeline_cache", Category::RendererAdvanced,
         Specialization::Default};
+
+    SwitchableSetting<NativeAsyncDraws> native_async_draws{linkage,
+                                                           NativeAsyncDraws::Skip,
+                                                           "native_async_draws",
+                                                           Category::RendererAdvanced,
+                                                           Specialization::Default,
+                                                           true,
+                                                           true};
+
+    SwitchableSetting<u32, true> native_pipeline_wait_ms{linkage,
+                                                         8,
+                                                         1,
+                                                         100,
+                                                         "native_pipeline_wait_ms",
+                                                         Category::RendererAdvanced,
+                                                         Specialization::Countable,
+                                                         true,
+                                                         true};
+
+    // Precache shaders before the game starts: the compute programs in the game files and the
+    // cached graphics pipelines the boot leaves for later are built on the loading screen, so the
+    // driver's cache holds them before the game first uses them.
+    // Ask: the desktop app asks at launch while the game has no finished precache; where nothing
+    // asks, as Off.
+    SwitchableSetting<PrecacheShaders> precache_shaders{linkage,
+                                                        PrecacheShaders::Off,
+                                                        "precache_shaders",
+                                                        Category::RendererAdvanced,
+                                                        Specialization::Default,
+                                                        true,
+                                                        true};
 
     SwitchableSetting<bool> enable_compute_pipelines{linkage, false, "enable_compute_pipelines",
                                                      Category::RendererAdvanced};
@@ -718,7 +776,7 @@ struct Values {
     SwitchableSetting<bool> gpu_unswizzle_enabled{linkage, false, "gpu_unswizzle_enabled",
                                                   Category::RendererHacks};
 
-    SwitchableSetting<bool> pin_gpu_threads{linkage, false, "pin_gpu_threads",
+    SwitchableSetting<bool> pin_gpu_threads{linkage, true, "pin_gpu_threads",
                                             Category::RendererHacks};
 
     SwitchableSetting<ExtendedDynamicState> dyna_state{linkage,
@@ -802,7 +860,11 @@ struct Values {
     Setting<s32> current_user{linkage, 0, "current_user", Category::System};
 
     SwitchableSetting<ConsoleMode> use_docked_mode{linkage,
+#ifdef __ANDROID__
                                                    ConsoleMode::Handheld,
+#else
+                                                   ConsoleMode::Docked,
+#endif
                                                    "use_docked_mode",
                                                    Category::System,
                                                    Specialization::Radio,

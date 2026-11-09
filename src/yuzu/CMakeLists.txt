@@ -233,6 +233,7 @@ add_executable(yuzu
     yuzu.rc
     migration_dialog.h migration_dialog.cpp
     nup_dialogs.h nup_dialogs.cpp
+    shader_warm_dialog.h shader_warm_dialog.cpp
     migration_worker.h migration_worker.cpp
     libqt_common.h libqt_common.cpp
 
@@ -424,6 +425,9 @@ target_link_libraries(yuzu PRIVATE common core input_common frontend_common netw
 target_link_libraries(yuzu PRIVATE Boost::headers Qt6::Widgets Qt6::Charts Qt6::Concurrent Qt6::Network)
 # Unpacks NVIDIA's files from the Streamline release (nvidia_dlss_panel.cpp).
 target_link_libraries(yuzu PRIVATE ZLIB::ZLIB)
+if (WIN32)
+    target_link_libraries(yuzu PRIVATE QuaZip::QuaZip)
+endif()
 target_link_libraries(yuzu PRIVATE ${PLATFORM_LIBRARIES} Threads::Threads)
 if (ENABLE_OPENGL)
     target_link_libraries(yuzu PRIVATE glad)

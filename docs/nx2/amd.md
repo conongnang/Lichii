@@ -16,8 +16,8 @@ the old way there.
 
 | Guest (NVIDIA) behaviour | Vulkan, and what AMD does | What Lichii does | Change |
 |---|---|---|---|
-| `FMNMX` returns the operand that is not NaN, and saturation turns NaN into 0 | `FMin`, `FMax` and `FClamp` leave NaN undefined; AMD returns the NaN, and blurred or accumulated targets spread it over the screen | Min, max, clamp, saturate and the atomic float min/max loops are emitted as `NMin`/`NMax`, clamp as `NMin(NMax(x, lo), hi)` | [#432] (from [#325]) |
-| A bound render target that the fragment shader doesn't export keeps its old value | The attachment gets an undefined value; AMD writes whatever its export registers hold (format maximum, NaN) | Colour writes are masked for the render target components the fragment shader doesn't write | [#353] (from [#323]) |
+| `FMNMX` returns the operand that is not NaN, and saturation turns NaN into 0 | `FMin`, `FMax` and `FClamp` leave NaN undefined; AMD returns the NaN, and blurred or accumulated targets spread it over the screen | Min, max, clamp and saturate are emitted as `NMin`/`NMax`, clamp as `NMin(NMax(x, lo), hi)` | [#432] (from [#325]) |
+| A bound render target that the fragment shader doesn't export keeps its old value | The attachment gets an undefined value; AMD writes whatever its export registers hold (format maximum, NaN) | The colour write mask, in the pipeline and in the dynamic mask, leaves out the components the fragment shader doesn't write | [#353] (from [#323]) |
 | Storage buffers start at the guest's alignment, so 64- and 128-bit accesses are aligned | Bindings start at `minStorageBufferOffsetAlignment`, which is 4 bytes on AMD; vector views of the binding read the wrong words | Misaligned 64/128-bit accesses are split into 32-bit words | [#295] |
 | Demoted fragments stop writing where the guest's control flow says | Moving demotes to the end of the program over nested returns let helper lanes keep writing; AMD drew a black scene | Nested returns are counted before demotes move | [#127] |
 | Fragment subgroup shuffles | AMD's proprietary driver gets them wrong | Broadcast fallback on that driver | [#273] |
@@ -29,8 +29,7 @@ Not specific to AMD, but easy to mistake for an AMD bug:
 - Ocarina's volumetric fog reads its sky-light probes 104-122 MiB past a pointer it loads from a
   table. With the 64 MiB cap for read-only table pointers every probe read returned 0, the fog lost
   its sky ambient and outdoor scenes turned into a white haze, on every vendor. [#351] binds
-  read-only table-pointer pools as far as a storage buffer reaches (up to 1 GiB); a 256 MiB cap
-  ([#292]) still left a white blob in the Kakariko graveyard.
+  read-only table pointers to the end of their mapping instead.
 - Two of Ocarina's compute shaders take minutes to optimise in AMD's driver ([#200]); [#273] builds
   them unoptimised on that driver.
 
@@ -42,18 +41,15 @@ Check these before filing a new one.
 |---|---|
 | Neon-green canopy or tint in Kokiri Forest | [#285], [#354] |
 | Lighting flicker | [#392] |
-| Texture flicker with Low GPU accuracy and `EDEN_NX2_SPLIT=2` | [#163] |
 | Driver timeout or device lost at gameplay start | [#165] |
 | Out of device memory on 8 GB cards | [#342] |
-| Invalid fragment SPIR-V on RADV (depth image read as the wrong type) | [#236] |
 | Frame rate (one GPU thread at 99%) | [#403] |
 
 ## Settings for AMD users
 
 - Keep the split GPU thread on (`EDEN_NX2_SPLIT=2`, the default in `nx2_switches.txt`) and GPU
-  accuracy below High, which turns the split off. One open report has textures flickering in that
-  setup on an RX 9070 XT ([#163]); High accuracy fixed the flicker there but cost most of the frame
-  rate, because it turns the split off.
+  accuracy below High, which turns the split off. Textures flickering in that setup on an RX 9070
+  XT ([#163]) were fixed by [#425].
 - Logging at `*:Info` costs CPU time in busy scenes. Use `*:Error` when you compare frame rates
   ([#403]).
 - The first run compiles every shader and can stall for minutes; later runs load the pipeline
@@ -74,7 +70,7 @@ Check these before filing a new one.
    AMD and NVIDIA differ.
 4. Check the bindings as well as the shader. Reads past the end of a buffer bound too small return
    zeros or other values from inside the buffer under robust buffer access, so a plausible value
-   doesn't prove the binding is large enough. Ocarina's fog read zeros this way ([#292]).
+   doesn't prove the binding is large enough. Ocarina's fog read zeros this way ([#351]).
 5. If you can, compare with an NVIDIA run. A difference that also shows up there is an emulation
    bug, not an AMD one.
 
@@ -82,10 +78,8 @@ Check these before filing a new one.
 [#163]: https://github.com/zortos293/Lichii/issues/163
 [#165]: https://github.com/zortos293/Lichii/issues/165
 [#200]: https://github.com/zortos293/Lichii/issues/200
-[#236]: https://github.com/zortos293/Lichii/issues/236
 [#273]: https://github.com/zortos293/Lichii/pull/273
 [#285]: https://github.com/zortos293/Lichii/issues/285
-[#292]: https://github.com/zortos293/Lichii/pull/292
 [#295]: https://github.com/zortos293/Lichii/pull/295
 [#323]: https://github.com/zortos293/Lichii/issues/323
 [#325]: https://github.com/zortos293/Lichii/issues/325
@@ -96,4 +90,5 @@ Check these before filing a new one.
 [#378]: https://github.com/zortos293/Lichii/pull/378
 [#392]: https://github.com/zortos293/Lichii/issues/392
 [#403]: https://github.com/zortos293/Lichii/issues/403
+[#425]: https://github.com/zortos293/Lichii/pull/425
 [#432]: https://github.com/zortos293/Lichii/pull/432

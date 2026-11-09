@@ -140,8 +140,6 @@ void Config::SetUpIni() {
             WriteStringSetting(setting.GetLabel(), value);
             WriteBooleanSetting(setting.GetLabel() + "\\default", false);
         };
-        seed(Settings::values.scaling_filter, ToString(u32(Settings::ScalingFilter::Fsr3)));
-        seed(Settings::values.gpu_accuracy, ToString(u32(Settings::GpuAccuracy::Low)));
         seed(Settings::values.nvdec_emulation, ToString(u32(Settings::NvdecEmulation::Gpu)));
         seed(Settings::values.async_presentation, ToString(true));
         seed(Settings::values.use_asynchronous_shaders, ToString(true));

@@ -816,3 +816,24 @@ TEST_CASE("Maxwell3D keeps state written after the split stops over the front's 
     CHECK(engine.shadow_state.reg_array[state] == 0x5678);
     CHECK(engine.regs.reg_array[state] == 0x5678);
 }
+
+TEST_CASE("Maxwell3D's split front uploads macro code sent as one multi-method run",
+          "[video_core][gpu_split_dependencies]") {
+    using Access = VideoCommon::GpuSplitTestAccess;
+    Fixture f;
+    VideoCommon::GpuSplit split;
+    Access::Initialize(split, f.system);
+    auto& engine = f.fast;
+    engine.SetNativeTuringMacroMode(true);
+    // GCC 13's loop unswitching dropped these words from the front's per-word loop (#500).
+    constexpr u32 pointer = 0x262;
+    constexpr std::array<u32, 6> code{0x740003, 0x18c00000, 0x318c0001,
+                                      0x740003, 0x18c00000, 0x318c0000};
+    engine.FrontCallMethod(f.system, split, MAXWELL3D_REG_INDEX(load_mme.instruction_ptr), pointer,
+                           true);
+    engine.FrontCallMultiMethod(f.system, split, MAXWELL3D_REG_INDEX(load_mme.instruction),
+                                code.data(), code.size(), code.size());
+    const auto& macros = engine.GetNativeMacroEngine();
+    REQUIRE(macros.native_write_offset == pointer * 3 + code.size());
+    CHECK(std::equal(code.begin(), code.end(), macros.native_code.begin() + pointer * 3));
+}

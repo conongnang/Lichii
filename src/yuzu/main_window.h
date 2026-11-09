@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <QPointer>
 #include <QMessageBox>
 #include <QFutureWatcher>
 #include <QPushButton>
@@ -41,7 +42,7 @@
 #ifdef ENABLE_UPDATE_CHECKER
 #include <QFuture>
 #include <QFutureWatcher>
-#include "common/net/net.h"
+#include "frontend_common/update_checker.h"
 #endif
 
 class QtConfig;
@@ -57,6 +58,7 @@ class MultiplayerState;
 class QPushButton;
 class QProgressDialog;
 class NupProgressDialog;
+class ShaderWarmDialog;
 class QSlider;
 class QHBoxLayout;
 class WaitTreeWidget;
@@ -75,6 +77,7 @@ class QtSoftwareKeyboardDialog;
 class QtNXWebEngineView;
 
 namespace VideoCore {
+enum class FrameGenState : u8;
 class ShaderNotify;
 }
 namespace Core {
@@ -359,6 +362,9 @@ private slots:
     void OnGameListDumpRomFS(u64 program_id, const std::string& game_path, DumpRomFSTarget target);
     void OnGameListVerifyIntegrity(const std::string& game_path);
     void OnGameListConvertToNup(const std::string& game_path);
+    void OnGameListPrepareShaderWarm(u64 program_id, const std::string& game_path);
+    void OnGameListDeleteShaderWarm(u64 program_id);
+    void PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path);
     void OnGameListExtractNup(const std::string& game_path);
     void OnGameListEditNupMetadata(const std::string& game_path);
     void OnGameListCopyTID(u64 program_id);
@@ -460,6 +466,7 @@ private:
     void UpdateFilterText();
     void UpdateAAText();
     void UpdatePostShaderText();
+    void UpdateFrameGenButton();
     void UpdateVolumeUI();
     void UpdateStatusBar();
     void UpdateGPUAccuracyButton();
@@ -501,8 +508,8 @@ private:
     std::shared_ptr<InputCommon::InputSubsystem> input_subsystem;
 
 #ifdef ENABLE_UPDATE_CHECKER
-    QFuture<std::optional<Common::Net::Release>> update_future;
-    QFutureWatcher<std::optional<Common::Net::Release>> update_watcher;
+    QFuture<UpdateChecker::CheckResult> update_future;
+    QFutureWatcher<UpdateChecker::CheckResult> update_watcher;
 #endif
 
     MultiplayerState* multiplayer_state = nullptr;
@@ -540,6 +547,10 @@ private:
     QPushButton* filter_status_button = nullptr;
     QPushButton* aa_status_button = nullptr;
     QPushButton* post_shader_status_button = nullptr;
+    QPushButton* frame_gen_status_button = nullptr;
+    VideoCore::FrameGenState frame_gen_state{};
+    u64 frame_gen_frames = 0;
+    bool frame_gen_generating = false;
     VolumeButton* volume_button = nullptr;
     QWidget* volume_popup = nullptr;
     QSlider* volume_slider = nullptr;
@@ -591,6 +602,7 @@ private:
     QFutureWatcher<FileSys::Nup::PackResult> nup_watcher;
     std::shared_ptr<std::atomic_bool> nup_cancel;
     bool nup_running{};
+    QPointer<ShaderWarmDialog> shader_warm_dialog;
     std::string nup_source_path;
 
     // Last game booted, used for multi-process apps

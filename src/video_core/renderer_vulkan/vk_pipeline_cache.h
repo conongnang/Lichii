@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <deque>
 #include <filesystem>
@@ -135,7 +136,7 @@ public:
 
     void TickFrame();
 
-    [[nodiscard]] ComputePipeline* CurrentComputePipeline();
+    [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);
 
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
@@ -143,9 +144,49 @@ public:
 private:
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipelineSlowPath();
 
+    /// FixedPipelineState::Refresh of graphics_key, keeping only the vertex attribute types the
+    /// bound programs read (see VideoCommon::KeyedAttributeTypes).
+    void RefreshGraphicsKey();
+
+    /// A native graphics pipeline translated and built on a worker (asynchronous translation).
+    struct PendingTranslation {
+        std::array<VideoCommon::GraphicsEnvironment, Maxwell::MaxShaderProgram> envs;
+        std::array<bool, Maxwell::MaxShaderProgram> used{};
+        std::mutex mutex;
+        std::condition_variable done_cv;
+        bool done{};
+        std::unique_ptr<GraphicsPipeline> pipeline;
+    };
+
+    /// Whether the current native draw's pipeline may be translated on a worker while the draw
+    /// is skipped: asynchronous shaders, native_async_draws Transient, render targets redrawn
+    /// every frame, no transform feedback.
+    [[nodiscard]] bool CanTranslateAsync();
+    /// Translates and builds the current key's pipeline on a worker.
+    void StartAsyncTranslation();
+    /// Moves a finished translation into the cache when its answers still hold. False when the
+    /// pipeline is to be made on this thread instead.
+    bool AdoptTranslation(PendingTranslation& job);
+
     /// Returns `pipeline` when it is built or its draw must wait for it, nullptr when the draw
     /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).
-    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) const noexcept;
+    [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
+
+public:
+    /// Whether the rasterizer skips the current native draw while its pipeline builds when its
+    /// render targets are redrawn every frame (native_async_draws Transient, asynchronous shaders).
+    [[nodiscard]] bool SkipsUnbuiltTransientDraws() const noexcept;
+    /// Counts a draw skipped that way, for the runtime pipeline log.
+    void CountTransientSkip() noexcept;
+    /// Counts a native draw that waits for its pipeline, by reason (see the runtime pipeline log).
+    void CountUnbuiltHeld(int reason) noexcept;
+    /// Whether the last lookup's null pipeline means the draw is skipped while its pipeline is
+    /// translated on a worker; clears it.
+    [[nodiscard]] bool TakeTranslationSkip() noexcept {
+        return std::exchange(translation_skip, false);
+    }
+
+private:
 
     std::unique_ptr<GraphicsPipeline> CreateGraphicsPipeline();
 
@@ -177,6 +218,28 @@ private:
 
     void QueueVulkanPipelineCacheFlush();
 
+    /// Queues one write of the driver pipeline cache file on the serialization thread, with no
+    /// throttle. For the end of a precache: its builds never reach the timed flush, which counts
+    /// only pipelines built during play.
+    void QueueVulkanPipelineCacheSave();
+
+    /// One build of the shader precache: builds a pipeline and destroys it, true when it built.
+    struct PrecacheJob {
+        u64 graphics_hash{}; ///< The cached graphics pipeline it builds, 0 for a compute program
+        Common::UniqueFunction<bool> build;
+    };
+
+    /// Shader precache before the game starts (precache_shaders), on every CPU thread: the cached
+    /// graphics pipelines this boot skipped (`jobs`; `precached` holds those built by earlier
+    /// precaches) and the compute programs of the title's precache file (made from the game files,
+    /// missing reads guessed) are built, then thrown away. They only fill the driver's shader
+    /// cache, so a later build of the same pipeline finds the driver's work done. Reports progress
+    /// through `callback` and returns when it is done, skipped from the loading screen or the load
+    /// is stopped.
+    void PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
+                         std::unordered_set<u64> precached, std::stop_token stop_loading,
+                         const VideoCore::DiskResourceLoadCallback& callback);
+
     const Device& device;
     Scheduler& scheduler;
     DescriptorPool& descriptor_pool;
@@ -192,11 +255,16 @@ private:
     EmissionBudget emission_budget;
 
     GraphicsPipelineCacheKey graphics_key{};
+    u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the programs' mask
     GraphicsPipeline* current_pipeline{};
 
     /// Destroys graphics pipelines unused for a while, once the GPU is done with them.
     void EvictUnusedPipelines();
     u64 frame_count{};
+    /// Wait budget of native draws for unbuilt pipelines left in this frame, in microseconds
+    /// (native_async_draws = Bounded). Only touched on the GPU thread; reset in TickFrame.
+    s64 native_wait_budget_us{8000};
+    s64 native_wait_used_us{}; ///< Budget spent since the last 10 s log line.
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
 
@@ -205,6 +273,11 @@ private:
     /// them (tick, pipeline)
     std::deque<std::pair<u64, std::unique_ptr<ComputePipeline>>> retired_compute_pipelines;
     ::Common::unordered_map<GraphicsPipelineCacheKey, std::unique_ptr<GraphicsPipeline>> graphics_cache;
+    std::unordered_map<GraphicsPipelineCacheKey, std::shared_ptr<PendingTranslation>>
+        pending_translations;
+    /// The last lookup returned no pipeline because its draw is skipped while a worker
+    /// translates the pipeline (TakeTranslationSkip).
+    bool translation_skip{};
 
     ShaderPools main_pools;
     std::mutex spare_pools_mutex;
@@ -232,6 +305,9 @@ private:
     std::atomic<size_t> last_cache_size{};
     std::atomic_bool flush_in_flight{};
 
+    /// Requested first when the cache is destroyed, to stop a rewrite of the disk cache: Android
+    /// and yuzu_cmd load with a stop token that never stops
+    std::stop_source serialization_stop;
     Common::ThreadWorker workers;
     /// Software HMMA compute pipelines on drivers that take minutes on them
     /// (Device::DefersSoftwareMatrixPipelines); nothing waits for this worker.
