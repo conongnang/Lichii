@@ -51,9 +51,9 @@ void CheckPreferences(const Settings::Values& settings, bool global = false) {
 }
 } // namespace
 
-TEST_CASE("Display filter defaults use ScaleForce and FXAA", "[game_presets]") {
+TEST_CASE("Display filter defaults use FSR 1 Soft and FXAA", "[game_presets]") {
     auto settings = std::make_unique<Settings::Values>();
-    CHECK(settings->scaling_filter.GetDefault() == Settings::ScalingFilter::ScaleForce);
+    CHECK(settings->scaling_filter.GetDefault() == Settings::ScalingFilter::Fsr3);
     CHECK(settings->anti_aliasing.GetDefault() == Settings::AntiAliasing::Fxaa);
 }
 

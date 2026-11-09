@@ -374,7 +374,11 @@ struct Values {
                                            true};
 
     SwitchableSetting<ScalingFilter> scaling_filter{linkage,
+#ifdef __ANDROID__
                                                     ScalingFilter::ScaleForce,
+#else
+                                                    ScalingFilter::Fsr3, // FSR 1 Soft
+#endif
                                                     "scaling_filter",
                                                     Category::Renderer,
                                                     Specialization::Default,
@@ -548,11 +552,7 @@ struct Values {
                                          linkage, 0, "bg_blue", Category::Renderer, Specialization::Default, true, true};
 
     SwitchableSetting<GpuAccuracy, true> gpu_accuracy{linkage,
-#ifdef __ANDROID__
-                                                      GpuAccuracy::Low,
-#else
-                                                      GpuAccuracy::High,
-#endif
+                                                      GpuAccuracy::Low, // Fast
                                                       "gpu_accuracy",
                                                       Category::RendererAdvanced,
                                                       Specialization::Default,
@@ -860,7 +860,11 @@ struct Values {
     Setting<s32> current_user{linkage, 0, "current_user", Category::System};
 
     SwitchableSetting<ConsoleMode> use_docked_mode{linkage,
+#ifdef __ANDROID__
                                                    ConsoleMode::Handheld,
+#else
+                                                   ConsoleMode::Docked,
+#endif
                                                    "use_docked_mode",
                                                    Category::System,
                                                    Specialization::Radio,
