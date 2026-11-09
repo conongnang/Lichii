@@ -1002,14 +1002,12 @@ struct Memory::Impl {
             // It is often the case the games like to access wildly different addresses. Hence why I propose
             // we should let the compiler just do it's thing...
             if (current_area.last_address != subaddress) {
-                // EDEN_NX2_GUEST_FAST (Fritchii EXP35): collected like a GPU-modified page instead
-                // of asking OnCPUWrite under both caches' mutexes; the back applies collected
-                // writes to both caches at its next FlushCaching, before each draw.
-                const int fast_mode = Tegra::Nx2GuestFastMode();
-                const bool collect_unasked =
-                    fast_mode != 0 && address != 0 && size != 0 &&
-                    Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
-                    (fast_mode == 2 || !Tegra::Nx2MayBeGpuWritten(address, size));
+                // Switch 2 titles: collected without asking OnCPUWrite under both caches'
+                // mutexes, which the split's back holds through each draw; the back applies
+                // collected writes to both caches at its next FlushCaching, before each draw
+                // (from Frizti's Fritchii: Ocarina of Time +1 fps, walk hitches 5 -> 2 of 6).
+                const bool collect_unasked = address != 0 && size != 0 &&
+                                             Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
                 // Short circuit the need to check for address/size
                 auto const do_collection = collect_unasked || ((address != 0 && size != 0)
                     && system.GPU().OnCPUWrite(address, size));
