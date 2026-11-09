@@ -272,7 +272,7 @@ jobs:
             -DYUZU_USE_BUNDLED_SDL3=ON
             -DVulkanHeaders_FORCE_BUNDLED=ON
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
-            -DENABLE_UPDATE_CHECKER=ON
+            -DENABLE_UPDATE_CHECKER=OFF
             -DLICHII_BUILD_TAG=build-${{ github.run_number }}
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }}
             -DUSE_DISCORD_PRESENCE=OFF
@@ -315,7 +315,7 @@ jobs:
             -DYUZU_ROOM_STANDALONE=OFF \
             -DYUZU_USE_BUNDLED_QT=OFF \
             -DYUZU_USE_BUNDLED_SDL3=ON \
-            -DENABLE_UPDATE_CHECKER=ON \
+            -DENABLE_UPDATE_CHECKER=OFF \
             -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
             -DUSE_DISCORD_PRESENCE=OFF \
@@ -345,7 +345,7 @@ jobs:
             "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" \
             -DVulkanHeaders_FORCE_BUNDLED=ON \
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
-            -DENABLE_UPDATE_CHECKER=ON \
+            -DENABLE_UPDATE_CHECKER=OFF \
             -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
             -DUSE_DISCORD_PRESENCE=OFF \
@@ -363,7 +363,6 @@ jobs:
         run: |
           if command -v ccache > /dev/null; then ccache --zero-stats; else sccache --zero-stats; fi
           targets="yuzu yuzu-cmd"
-          if [[ "${{ matrix.platform }}" == windows* ]]; then targets="$targets lichii-updater"; fi
           cmake --build build/release --target $targets --parallel
           if command -v ccache > /dev/null; then ccache --show-stats; else sccache --show-stats; fi
 
