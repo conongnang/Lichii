@@ -50,11 +50,11 @@ $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method
 $PY -I C:/lx/src/tools/nx2/debug_mcp.py --server 127.0.0.1:6545 --call '{"method":"screenshot"}' --out C:/Users/Zortos/.capy/work/lichii-debug/shot.png
 ```
 
-Methods: `status`, `frame_times` (`seconds`, `refresh_hz`), `screenshot`, `log_tail` (`after`, `contains`), `log_filter`, `capture_frame` (the frame dump below, taken now; `sampled`, `index`), `capture_image`, `reject_shaders` (`EDEN_NX2_REJECT_HASH` at runtime; `"reject": false` restores). Without `--call` the script is a stdio MCP server. See `docs/nx2/debug-mcp.md`.
+Methods: `status`, `frame_times` (`seconds`, `refresh_hz`), `screenshot`, `log_tail` (`after`, `contains`), `log_filter`, `capture_frame` (the frame dump below, taken now; `sampled`, `index`), `capture_image`, `reject_shaders` (`EDEN_NX2_REJECT_HASH` at runtime; `"reject": false` restores), `switches` (turn GPU shortcuts off and on live; `capture_frame` with `geometry` compares cached vertex and index buffers with guest memory). Arguments go under `"params"` (`{"method":"reject_shaders","params":{"hashes":[...]}}`); fields beside `method` are silently ignored. Without `--call` the script is a stdio MCP server. See `docs/nx2/debug-mcp.md`.
 
 - Try a live experiment (screenshot, `reject_shaders` A/B, `capture_frame`, `log_tail`) before asking the owner for a new build or shortcut.
 - Use full 16-hex-digit hashes; shorter ones are refused.
-- Restore every hash you reject before you finish.
+- Restore every hash you reject and every switch you change before you finish.
 - Never start or stop the emulator. If nothing listens, ask the owner to launch the game.
 - Keep sessions light while the owner plays: one request at a time, no capture loops, `sampled` only when you need pass inputs.
 

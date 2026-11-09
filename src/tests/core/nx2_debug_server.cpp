@@ -21,6 +21,7 @@
 #include "core/memory.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_live_switches.h"
 
 namespace {
 
@@ -457,4 +458,54 @@ TEST_CASE("Injected input merges buttons and replaces sticks while installed", "
     controller.SetInputInjector({});
     REQUIRE(controller.GetNpadButtons().raw == None);
     REQUIRE(controller.GetSticks().left.x == 0);
+}
+
+TEST_CASE("Debug switches flip live and report what they replaced", "[core][nx2_debug_server]") {
+    const json initial = Core::Nx2Debug::SetSwitches(json::object());
+    REQUIRE(initial["switches"].size() == 4);
+    REQUIRE(initial["switches"]["geometry_sync_skip"] == true);
+    REQUIRE(initial["previous"].empty());
+
+    const json changed = Core::Nx2Debug::SetSwitches(
+        json{{"set", {{"geometry_sync_skip", false}, {"fast_draw", false}}}});
+    REQUIRE(changed["previous"]["geometry_sync_skip"] == true);
+    REQUIRE(changed["switches"]["geometry_sync_skip"] == false);
+    REQUIRE(changed["switches"]["fast_draw"] == false);
+    REQUIRE_FALSE(VideoCommon::Nx2Live::GeometrySyncSkip());
+    REQUIRE_FALSE(VideoCommon::Nx2FastDraw::Enabled());
+
+    const json restored = Core::Nx2Debug::SetSwitches(
+        json{{"set", {{"geometry_sync_skip", true}, {"fast_draw", true}}}});
+    REQUIRE(restored["previous"]["fast_draw"] == false);
+    REQUIRE(VideoCommon::Nx2Live::GeometrySyncSkip());
+    REQUIRE(VideoCommon::Nx2FastDraw::Enabled());
+
+    REQUIRE_THROWS(Core::Nx2Debug::SetSwitches(json{{"set", {{"no_such_switch", false}}}}));
+}
+
+TEST_CASE("Debug geometry summary pairs guest and host copies", "[core][nx2_debug_server]") {
+    const auto entry = [](u64 draw, u64 slot, const char* source, const char* hash,
+                          bool gpu_modified = false) {
+        return json{{"kind", "geometry"}, {"draw", draw},       {"slot", slot},
+                    {"device_addr", "0x1000"}, {"source", source}, {"hash", hash},
+                    {"gpu_modified", gpu_modified}, {"cpu_modified", false},
+                    {"page_table_match", true}};
+    };
+    std::vector<json> entries{
+        entry(1, 0, "guest", "aa"), entry(1, 0, "host", "aa"),       // same bytes
+        entry(2, 0, "guest", "bb"), entry(2, 0, "host", "cc"),       // stale cache
+        entry(3, 32, "guest", "dd", true), entry(3, 32, "host", "ee"), // GPU wrote it: not stale
+        entry(4, 1, "guest", "ff"),                                    // no host buffer
+    };
+    entries.back()["cpu_modified"] = true;
+    entries.back()["page_table_match"] = false;
+    const json summary = Core::Nx2Debug::SummarizeGeometry(entries);
+    REQUIRE(summary["buffers"] == 4);
+    REQUIRE(summary["compared"] == 3);
+    REQUIRE(summary["stale"] == 1);
+    REQUIRE(summary["cpu_modified_after_sync"] == 1);
+    REQUIRE(summary["page_table_mismatch"] == 1);
+    REQUIRE(summary["stale_entries"].size() == 1);
+    REQUIRE(summary["stale_entries"][0]["draw"] == 2);
+    REQUIRE(summary["stale_entries"][0]["host_hash"] == "cc");
 }

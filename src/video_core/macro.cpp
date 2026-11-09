@@ -33,6 +33,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/rasterizer_interface.h"
 #include "video_core/macro.h"
+#include "video_core/nx2_live_switches.h"
 #include "video_core/query_dma.h"
 
 #include "common/assert.h"
@@ -1517,11 +1518,9 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
             return;
         }
 #endif
-        // EDEN_NX2_MME_MEMO=0: interpret every call (see macro_memo.h).
-        static const bool use_memo = [] {
-            const char* value = std::getenv("EDEN_NX2_MME_MEMO");
-            return value == nullptr || value[0] != '0';
-        }();
+        // EDEN_NX2_MME_MEMO=0 or the debug server's mme_memo switch: interpret every call (see
+        // macro_memo.h).
+        const bool use_memo = VideoCommon::Nx2Live::MmeMemo();
         if (use_memo) {
             // EDEN_NX2_MME_MEMO_STATS: log the memo's counters every 2^24 calls.
             if (static const bool memo_stats = std::getenv("EDEN_NX2_MME_MEMO_STATS") != nullptr;

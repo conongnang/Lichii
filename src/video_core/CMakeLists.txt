@@ -120,6 +120,7 @@ add_library(video_core STATIC
     nx2_debug_control.h
     nx2_fast_draw.cpp
     nx2_fast_draw.h
+    nx2_live_switches.h
     nx2_profile.h
     nx2_perf.h
     nx2_download_trace.h

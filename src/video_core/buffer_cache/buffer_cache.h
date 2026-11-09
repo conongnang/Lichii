@@ -26,6 +26,7 @@
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_cmdpage_diag.h"
+#include "video_core/nx2_live_switches.h"
 #include "video_core/nx2_perf.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/texture_cache/util.h"
@@ -2766,7 +2767,8 @@ void BufferCache<P>::SynchronizeGeometryBuffer(u32 slot, BufferId buffer_id, DAd
     // The deletion count keeps a freed and reused buffer id from passing for the scanned one.
     GeometrySync& sync = geometry_syncs[slot];
     ++geometry_stats.syncs;
-    if (memory_tracker.IsSynchronized(slot) && sync.buffer_id == buffer_id &&
+    if (Nx2Live::GeometrySyncSkip() && memory_tracker.IsSynchronized(slot) &&
+        sync.buffer_id == buffer_id &&
         sync.device_addr == device_addr && sync.size == size &&
         sync.deletions == buffer_deletions) {
         ++geometry_stats.syncs_skipped;

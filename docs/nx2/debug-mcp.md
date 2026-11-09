@@ -140,7 +140,7 @@ server is on but idle, its thread sleeps in `epoll`/IOCP.
 | `pause`, `resume`, `step_frames` | Not possible | Freeze on the broken frame, capture it, step one present | 2 |
 | `input`, `input_sequence` (buttons, sticks, frame-timed sequences) | Owner plays to the spot | Agent walks to the spot itself and replays a repro (done) | 2 |
 | `shaders` (inventory) | Shader dump and offline sweep | List loaded programs: key, hash, stage, address, lowered or rejected with the error | 2 |
-| `switches` (live `EDEN_NX2_*`) | Relaunch per switch | Toggle the observer switches live (classification below) | 2 |
+| `switches` (live `EDEN_NX2_*`) | Relaunch per switch | Toggle GPU shortcuts live: fast_draw, geometry_sync_skip, ubo_reuse, mme_memo (done) | 2 |
 | `read_memory`, `search_memory`, `read_gpu_memory` | GDB stub session or log prints plus a rebuild | Read a range by address, find known values in the heap (done) | 3 |
 | `dump_texture`, `dump_buffer` | Frame dump of the whole frame | One resource by GPU address, as PNG plus raw | 3 |
 | `gpu_timings` | `EDEN_NX2_GPU_PROFILE` relaunch, zones only | Per-pass GPU time of one frame | 3 |
@@ -203,6 +203,30 @@ reports completion after it writes the manifest summary (`WriterLoop`, `vk_frame
 frame and summary lines, counts per entry kind, the first entries, and the `frame_dump_index.py`
 command. With `index: true`, the adapter runs that command itself. The adapter-only
 `capture_image {directory, name}` returns one pass PNG as image content.
+
+With `geometry` (`true`, or a list of shader hashes to limit it to their draws), each draw's
+vertex buffers (slots 0-31) and index buffer (slot 32) are recorded twice, once per range and
+capture: the guest bytes and a GPU copy of the cached host buffer the binding names, at the draw's
+place in the command buffer (`kind: geometry`, `source: guest|host`, with stride, `gpu_modified`,
+`cpu_modified` and `page_table_match`). The result's `geometry` summary counts pairs whose hashes
+differ while the GPU did not write the range (`stale`), ranges still marked CPU modified after the
+draw synchronized them (`cpu_modified_after_sync`) and bindings whose buffer the page table no
+longer maps there (`page_table_mismatch`), and lists the first 32 stale entries. Any of the three
+means the draw read geometry that is not what the guest wrote. Ranges are capped at 16 MiB.
+
+**`switches`** `{set?}`. Lists the GPU shortcuts that can be turned off and on while the game runs
+and their state; `set` (`{"fast_draw": false}`) changes them and returns the previous values. They
+are relaxed atomics read where each shortcut is used (`src/video_core/nx2_live_switches.h`), so a
+bug that only shows after a long session can be A/B tested on that session:
+
+| Switch | Turns off |
+|---|---|
+| `fast_draw` | Delta draws that keep the previous draw's pipeline, views and samplers (`nx2_fast_draw.h`); the next draw resolves in full |
+| `geometry_sync_skip` | `SynchronizeGeometryBuffer`'s skip of vertex and index ranges no tracked CPU write reached; every draw scans them again |
+| `ubo_reuse` | Rebinding the stream copy of unchanged small uniform buffers (`EDEN_NX2_UBOREUSE` sets the start value) |
+| `mme_memo` | Replaying repeated macro calls (`EDEN_NX2_MME_MEMO` sets the start value) |
+
+Restore every switch you change before you finish.
 
 **`sample`** `{threads?, seconds?, max_chars?}`. The in-process sampling profiler
 (`src/common/nx2_sampler.cpp`, also `EDEN_NX2_SAMPLE` at startup) on demand: it pauses the named

@@ -456,6 +456,38 @@ public:
         }
     }
 
+    /// Visits the vertex buffers (slots 0-31) and, when `indexed`, the index buffer (slot 32) bound
+    /// for the last draw, for diagnostics. `host` is the buffer the binding names, null when that
+    /// id no longer holds the range; `page_table_match` is whether the page table still maps the
+    /// range to that buffer. Nothing is created or synchronized.
+    template <typename Func>
+    void ForEachBoundGeometryBuffer(bool indexed, Func&& func) {
+        const auto visit = [&](u32 slot, const Binding& binding) {
+            if (binding.device_addr == 0 || binding.size == 0) {
+                return;
+            }
+            const Buffer* host = nullptr;
+            u32 offset = 0;
+            if (binding.buffer_id != NULL_BUFFER_ID) {
+                const Buffer& buffer = slot_buffers[binding.buffer_id];
+                if (buffer.IsInBounds(binding.device_addr, binding.size)) {
+                    host = &buffer;
+                    offset = buffer.Offset(binding.device_addr);
+                }
+            }
+            const bool page_table_match =
+                page_table[binding.device_addr >> CACHING_PAGEBITS] == binding.buffer_id;
+            func(slot, binding, host, offset, page_table_match);
+        };
+        for (u32 mask = enabled_vertex_buffers_mask; mask != 0; mask &= mask - 1) {
+            const u32 index = static_cast<u32>(std::countr_zero(mask));
+            visit(index, v_buffer[index]);
+        }
+        if (indexed) {
+            visit(NUM_VERTEX_BUFFERS, channel_state->index_buffer);
+        }
+    }
+
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
 

@@ -49,6 +49,14 @@ private:
 /// A reject_shaders hash: exactly 16 hex digits, optionally after 0x. Throws std::runtime_error.
 [[nodiscard]] u64 ParseShaderHash(std::string_view text);
 
+/// The `switches` tool: applies `set` ({name: bool}) to VideoCommon::Nx2Live's switches and returns
+/// their state, the values `set` replaced and what each one turns off.
+[[nodiscard]] nlohmann::json SetSwitches(const nlohmann::json& params);
+
+/// `capture_frame`'s `geometry` summary from its kind:geometry manifest entries: guest/host pairs
+/// whose hashes differ while the GPU did not write the range, and the other stale-binding signs.
+[[nodiscard]] nlohmann::json SummarizeGeometry(std::span<const nlohmann::json> entries);
+
 /// search_memory's pattern: hex digit pairs, optionally after 0x, spaces allowed. Throws
 /// std::runtime_error.
 [[nodiscard]] std::vector<u8> ParseHexBytes(std::string_view text);

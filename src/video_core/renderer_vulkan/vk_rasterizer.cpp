@@ -1105,6 +1105,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         if (frame_dump.CapturingBuffers()) {
             recorded |= FrameDumpBuffers(false, pipeline->ShaderHashes());
         }
+        if (frame_dump.CapturingGeometry(pipeline->ShaderHashes())) {
+            recorded |= FrameDumpGeometry(pipeline->ShaderHashes(), is_indexed);
+        }
         if (recorded) {
             scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
         }
@@ -3167,6 +3170,32 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
     return frame_dump.NoteBuffers(compute, shader_hashes, buffers);
 }
 
+bool RasterizerVulkan::FrameDumpGeometry(std::span<const u64> shader_hashes, bool is_indexed) {
+    static constexpr u32 GEOMETRY_CAP = 16U << 20;
+    std::vector<FrameDump::GeometryBuffer> buffers;
+    buffer_cache.ForEachBoundGeometryBuffer(is_indexed, [&](u32 slot, const auto& binding,
+                                                            const auto* host, u32 host_offset,
+                                                            bool page_table_match) {
+        const u32 size = std::min(binding.size, GEOMETRY_CAP);
+        FrameDump::GeometryBuffer& buffer = buffers.emplace_back(FrameDump::GeometryBuffer{
+            .slot = slot,
+            .gpu_addr = binding.gpu_addr,
+            .device_addr = binding.device_addr,
+            .bound_size = binding.size,
+            .size = size,
+            .stride = slot < 32 ? static_cast<u32>(maxwell3d->regs.vertex_streams[slot].stride) : 0U,
+            .gpu_modified = buffer_cache.IsRegionGpuModified(binding.device_addr, size),
+            .cpu_modified = buffer_cache.IsRegionCpuModified(binding.device_addr, size),
+            .page_table_match = page_table_match,
+            .host = host ? host->Handle() : VK_NULL_HANDLE,
+            .host_offset = host_offset,
+            .guest = std::vector<u8>(size),
+        });
+        device_memory.ReadBlockUnsafe(binding.device_addr, buffer.guest.data(), size);
+    });
+    return frame_dump.NoteGeometry(shader_hashes, buffers);
+}
+
 void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
     std::array<ImageView*, VideoCommon::NUM_RT> colors{};
     const auto& ids = texture_cache.GetRenderTargets().color_buffer_ids;
@@ -3191,7 +3220,7 @@ void RasterizerVulkan::TickFrame() {
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
-                           capture->id);
+                           capture->id, capture->geometry, std::move(capture->geometry_shaders));
         }
         if (const auto change = VideoCore::Nx2Debug::TakeRejectChange()) {
             pipeline_cache.RefreshDebugRejections(change->unrejected);

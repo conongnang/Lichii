@@ -97,7 +97,11 @@ TOOLS = [
                        "manifest.jsonl. 'sampled' also reads back every sampled texture with its "
                        "sampler state; 'buffers' records every draw's and dispatch's uniform and "
                        "storage buffers (kind: buffer, buffer_<hash>.bin.zst) and dispatch group "
-                       "counts (kind: launch). Returns "
+                       "counts (kind: launch). 'geometry' (true, or a list of shader hashes "
+                       "to limit it to their draws) records each draw's vertex and index "
+                       "buffers twice, from guest memory and from the cached host buffer "
+                       "(kind: geometry, source guest/host), and returns a 'geometry' summary "
+                       "of pairs whose hashes differ. Returns "
                        "the directory, summary, entry counts and the first manifest entries. "
                        "'index' builds index.html with frame_dump_index.py.",
         "inputSchema": {
@@ -105,6 +109,8 @@ TOOLS = [
             "properties": {
                 "sampled": {"type": "boolean"},
                 "buffers": {"type": "boolean"},
+                "geometry": {"anyOf": [{"type": "boolean"},
+                                       {"type": "array", "items": {"type": "string"}}]},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
                 "manifest_lines": {"type": "integer", "minimum": 0, "maximum": 5000},
                 "index": {"type": "boolean"},
@@ -134,6 +140,16 @@ TOOLS = [
                 "reject": {"type": "boolean"},
                 "timeout_s": {"type": "integer", "minimum": 0, "maximum": 60},
             },
+        },
+    },
+    {
+        "name": "switches",
+        "description": "Lists the GPU shortcuts that can be turned off and on while the game runs "
+                       "(fast_draw, geometry_sync_skip, ubo_reuse, mme_memo) with their state; "
+                       "'set' ({name: bool}) changes them and returns the previous values.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"set": {"type": "object", "additionalProperties": {"type": "boolean"}}},
         },
     },
     {

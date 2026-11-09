@@ -13,6 +13,8 @@
 #include <fstream>
 #include <future>
 #include <iterator>
+#include <map>
+#include <tuple>
 #include <numeric>
 #include <thread>
 
@@ -32,6 +34,7 @@
 #include "hid_core/hid_core.h"
 #include "video_core/gpu.h"
 #include "video_core/nx2_debug_control.h"
+#include "video_core/nx2_live_switches.h"
 #include "video_core/renderer_base.h"
 
 namespace Core::Nx2Debug {
@@ -432,9 +435,26 @@ json CaptureFrame(ToolState& state, const json& params) {
     std::filesystem::create_directories(directory);
     const bool sampled = params.value("sampled", false);
     const bool buffers = params.value("buffers", false);
+    // geometry: true for every draw, or a list of shader hashes whose draws to record.
+    bool geometry = false;
+    std::vector<u64> geometry_shaders;
+    if (const auto it = params.find("geometry"); it != params.end()) {
+        if (it->is_array()) {
+            for (const json& hash : *it) {
+                geometry_shaders.push_back(ParseShaderHash(hash.get<std::string>()));
+            }
+            geometry = !geometry_shaders.empty();
+        } else {
+            geometry = it->get<bool>();
+        }
+    }
     const int timeout = Param<int>(params, "timeout_s", 120, 1, 600);
-    VideoCore::Nx2Debug::RequestCapture(
-        {.id = id, .directory = directory, .sampled = sampled, .buffers = buffers});
+    VideoCore::Nx2Debug::RequestCapture({.id = id,
+                                         .directory = directory,
+                                         .sampled = sampled,
+                                         .buffers = buffers,
+                                         .geometry = geometry,
+                                         .geometry_shaders = std::move(geometry_shaders)});
     const auto finished = VideoCore::Nx2Debug::WaitCapture(id, std::chrono::seconds{timeout});
     if (!finished) {
         VideoCore::Nx2Debug::CancelCapture(id);
@@ -452,6 +472,7 @@ json CaptureFrame(ToolState& state, const json& params) {
     json frame;
     json summary;
     size_t total = 0;
+    std::vector<json> geometry_entries;
     std::ifstream manifest{directory / "manifest.jsonl"};
     for (std::string line; std::getline(manifest, line);) {
         json entry = json::parse(line, nullptr, false);
@@ -459,6 +480,9 @@ json CaptureFrame(ToolState& state, const json& params) {
             continue;
         }
         const std::string kind = entry.value("kind", std::string{});
+        if (kind == "geometry") {
+            geometry_entries.push_back(entry);
+        }
         if (kind == "frame") {
             frame = std::move(entry);
         } else if (kind == "summary") {
@@ -470,7 +494,7 @@ json CaptureFrame(ToolState& state, const json& params) {
             }
         }
     }
-    return {
+    json result = {
         {"directory", directory.generic_string()},
         {"sampled", sampled},
         {"buffers", buffers},
@@ -482,6 +506,14 @@ json CaptureFrame(ToolState& state, const json& params) {
         {"index_command",
          fmt::format("python3 -I tools/nx2/frame_dump_index.py \"{}\"", directory.generic_string())},
     };
+    if (geometry) {
+        result["geometry"] = SummarizeGeometry(geometry_entries);
+    }
+    return result;
+}
+
+json Switches(ToolState&, const json& params) {
+    return SetSwitches(params);
 }
 
 json RejectShaders(ToolState&, const json& params) {
@@ -754,6 +786,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"log_filter", handler(LogFilter)},
         {"capture_frame", handler(CaptureFrame)},
         {"reject_shaders", handler(RejectShaders)},
+        {"switches", handler(Switches)},
         {"sample", handler(SampleThreads)},
         {"speed_limit", handler(SpeedLimit)},
         {"read_memory", handler(ReadMemory)},
@@ -766,6 +799,75 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
 }
 
 } // Anonymous namespace
+
+json SetSwitches(const json& params) {
+    json previous = json::object();
+    if (const auto it = params.find("set"); it != params.end()) {
+        for (const auto& [name, value] : it->items()) {
+            const auto switches = VideoCommon::Nx2Live::Switches();
+            const auto found = std::ranges::find(switches, name, &VideoCommon::Nx2Live::Switch::name);
+            if (found == switches.end()) {
+                throw std::runtime_error{fmt::format("unknown switch {}", name)};
+            }
+            previous[name] = found->value->exchange(value.get<bool>(), std::memory_order_relaxed);
+        }
+    }
+    json current = json::object();
+    json descriptions = json::object();
+    for (const auto& entry : VideoCommon::Nx2Live::Switches()) {
+        const std::string name{entry.name};
+        current[name] = entry.value->load(std::memory_order_relaxed);
+        descriptions[name] = std::string{entry.description};
+    }
+    return {{"switches", std::move(current)}, {"previous", std::move(previous)},
+            {"descriptions", std::move(descriptions)}};
+}
+
+json SummarizeGeometry(std::span<const json> entries) {
+    // Entries come in guest/host pairs; a pair whose hashes differ while the GPU did not write the
+    // range means the cached copy is stale.
+    std::map<std::tuple<u64, u64, std::string>, std::pair<json, std::string>> pairs;
+    size_t cpu_modified = 0;
+    size_t page_table_mismatch = 0;
+    for (const json& entry : entries) {
+        const auto key = std::make_tuple(entry.value("slot", u64{}), entry.value("draw", u64{}),
+                                         entry.value("device_addr", std::string{}));
+        auto& pair = pairs[key];
+        if (entry.value("source", std::string{}) == "host") {
+            pair.second = entry.value("hash", std::string{});
+            continue;
+        }
+        cpu_modified += entry.value("cpu_modified", false) ? 1 : 0;
+        page_table_mismatch += entry.value("page_table_match", true) ? 0 : 1;
+        pair.first = entry;
+    }
+    json stale_entries = json::array();
+    size_t stale = 0;
+    size_t compared = 0;
+    for (auto& [key, pair] : pairs) {
+        json& guest = pair.first;
+        if (guest.is_null() || pair.second.empty()) {
+            continue;
+        }
+        ++compared;
+        if (guest.value("hash", std::string{}) == pair.second || guest.value("gpu_modified", false)) {
+            continue;
+        }
+        ++stale;
+        if (stale_entries.size() < 32) {
+            guest["host_hash"] = pair.second;
+            stale_entries.push_back(std::move(guest));
+        }
+    }
+    return {
+        {"buffers", pairs.size()},
+        {"compared", compared},
+        {"stale", stale},
+        {"cpu_modified_after_sync", cpu_modified},
+        {"page_table_mismatch", page_table_mismatch},
+        {"stale_entries", std::move(stale_entries)},
+    };
+}
 
 u64 ParseShaderHash(std::string_view text) {
     const std::string_view digits =

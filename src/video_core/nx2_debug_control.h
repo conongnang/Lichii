@@ -24,6 +24,10 @@ struct CaptureRequest {
     bool sampled;
     /// The uniform and storage buffers of every draw and dispatch, and dispatch group counts.
     bool buffers;
+    /// The vertex and index buffers of the draws of `geometry_shaders` (all draws when empty), as
+    /// guest bytes and as the cached host buffer holds them.
+    bool geometry{};
+    std::vector<u64> geometry_shaders{};
 };
 
 struct CaptureResult {

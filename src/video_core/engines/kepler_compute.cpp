@@ -23,6 +23,7 @@
 #include "core/core.h"
 #include "video_core/gpu_split.h"
 #include "video_core/fire_emblem_upscale.h"
+#include "video_core/nx2_live_switches.h"
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2.h"
 #include "video_core/engines/fermi_2d.h"
@@ -211,10 +212,7 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
         }
 #endif
         // Repeated calls replay their writes, as for 3D macros (macro_memo.h).
-        static const bool use_memo = [] {
-            const char* value = std::getenv("EDEN_NX2_MME_MEMO");
-            return value == nullptr || value[0] != '0';
-        }();
+        const bool use_memo = VideoCommon::Nx2Live::MmeMemo();
         auto& memo = native_macro->native_memo;
         if (use_memo && !watched) {
             memo.Synchronize(native_macro->native_code_generation);

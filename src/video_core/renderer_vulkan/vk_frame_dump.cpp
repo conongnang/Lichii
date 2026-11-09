@@ -266,11 +266,15 @@ void FrameDump::StopWriter() {
     stop_writer = false;
 }
 
-void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers, u64 id) {
+void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers, u64 id,
+                    bool geometry_, std::vector<u64> geometry_shaders_) {
     if (!schedule.Arm(sampled, buffers, id)) {
         VideoCore::Nx2Debug::FinishCapture(id, {.error = "another capture is in progress"});
         return;
     }
+    geometry = geometry_;
+    geometry_shaders = std::move(geometry_shaders_);
+    seen_geometry.clear();
     StopWriter();
     directory = std::move(directory_);
     truncated = false;
@@ -498,6 +502,47 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
             continue;
         }
         recorded |= RecordBuffer(buffer.host, buffer.host_offset, buffer.size, std::move(tags));
+    }
+    return recorded;
+}
+
+bool FrameDump::CapturingGeometry(std::span<const u64> shader_hashes) const noexcept {
+    if (!geometry || !schedule.Capturing()) {
+        return false;
+    }
+    if (geometry_shaders.empty()) {
+        return true;
+    }
+    return std::ranges::any_of(shader_hashes, [this](u64 hash) {
+        return hash != 0 && std::ranges::find(geometry_shaders, hash) != geometry_shaders.end();
+    });
+}
+
+bool FrameDump::NoteGeometry(std::span<const u64> shader_hashes, std::span<GeometryBuffer> buffers) {
+    std::string shaders;
+    for (const u64 hash : shader_hashes) {
+        if (hash != 0) {
+            shaders += fmt::format("{}\"{:016x}\"", shaders.empty() ? "" : ",", hash);
+        }
+    }
+    bool recorded = false;
+    for (GeometryBuffer& buffer : buffers) {
+        const std::tuple<u32, u64, u32> key{buffer.slot, buffer.device_addr, buffer.size};
+        if (std::ranges::find(seen_geometry, key) != seen_geometry.end()) {
+            continue;
+        }
+        seen_geometry.push_back(key);
+        const std::string tags = fmt::format(
+            R"("kind":"geometry","pass":{},"draw":{},"shaders":[{}],"slot":{},"type":"{}","gpu_addr":"{:#x}","device_addr":"{:#x}","bound_size":{},"size":{},"stride":{},"gpu_modified":{},"cpu_modified":{},"page_table_match":{},"host_bound":{})",
+            pass_index, draws - 1, shaders, buffer.slot, buffer.slot >= 32 ? "index" : "vertex",
+            buffer.gpu_addr, buffer.device_addr, buffer.bound_size, buffer.size, buffer.stride,
+            buffer.gpu_modified, buffer.cpu_modified, buffer.page_table_match,
+            buffer.host != VK_NULL_HANDLE);
+        Enqueue({.tags = tags + R"(,"source":"guest")", .data = std::move(buffer.guest), .raw = true});
+        if (buffer.host != VK_NULL_HANDLE) {
+            recorded |= RecordBuffer(buffer.host, buffer.host_offset, buffer.size,
+                                     tags + R"(,"source":"host")");
+        }
     }
     return recorded;
 }

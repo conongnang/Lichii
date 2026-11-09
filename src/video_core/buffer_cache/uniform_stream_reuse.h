@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "common/common_types.h"
+#include "video_core/nx2_live_switches.h"
 
 namespace VideoCommon {
 
@@ -31,13 +32,10 @@ concept StreamUniformReusable = requires(R& runtime, u32 size) {
     { runtime.CurrentTick() } -> std::convertible_to<u64>;
 };
 
-/// EDEN_NX2_UBOREUSE=0 turns the reuse off (every small uniform buffer is copied, as before).
+/// EDEN_NX2_UBOREUSE=0, or the debug server's `ubo_reuse` switch, turns the reuse off (every small
+/// uniform buffer is copied, as before).
 [[nodiscard]] inline bool UniformStreamReuseEnabled() noexcept {
-    static const bool enabled = [] {
-        const char* const value = std::getenv("EDEN_NX2_UBOREUSE");
-        return value == nullptr || value[0] != '0';
-    }();
-    return enabled;
+    return Nx2Live::UboReuse();
 }
 
 template <class Ref>

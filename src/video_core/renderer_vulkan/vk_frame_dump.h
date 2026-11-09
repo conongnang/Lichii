@@ -120,6 +120,24 @@ public:
         std::vector<u8> guest;
     };
 
+    /// A vertex buffer (slot 0-31) or the index buffer (slot 32) of a draw: the guest bytes and the
+    /// cached host buffer's bytes, so a stale cache shows as two different hashes.
+    struct GeometryBuffer {
+        u32 slot;
+        GPUVAddr gpu_addr;
+        u64 device_addr;
+        u32 bound_size;
+        u32 size;
+        u32 stride;
+        bool gpu_modified;
+        /// Still marked CPU modified after the draw synchronized its geometry.
+        bool cpu_modified;
+        bool page_table_match;
+        VkBuffer host;
+        u32 host_offset;
+        std::vector<u8> guest;
+    };
+
     explicit FrameDump(const Device& device, MemoryAllocator& memory_allocator,
                        Scheduler& scheduler);
     ~FrameDump();
@@ -136,6 +154,10 @@ public:
         return schedule.Capturing() && schedule.Buffers();
     }
 
+    /// Whether the debug server asked for the vertex and index buffers of the draws of the
+    /// shaders `ShaderHashes` holds (all draws when its list is empty).
+    [[nodiscard]] bool CapturingGeometry(std::span<const u64> shader_hashes) const noexcept;
+
     /// Reads back the textures of the current draw not yet seen in this pass. Returns true when
     /// copies were recorded, which ends the current render pass.
     bool NoteSampled(std::span<const Sampled> textures);
@@ -145,6 +167,9 @@ public:
     /// to run not yet seen for their shader. Returns true when copies were recorded.
     bool NoteBuffers(bool compute, std::span<const u64> shader_hashes,
                      std::span<BoundBuffer> buffers);
+    /// Records the vertex and index buffers of the current draw not yet seen in this capture.
+    /// Returns true when copies were recorded.
+    bool NoteGeometry(std::span<const u64> shader_hashes, std::span<GeometryBuffer> buffers);
     /// Records the group counts of the dispatch about to run.
     void NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,
                     const std::array<u32, 3>& block, std::optional<GPUVAddr> indirect,
@@ -166,7 +191,8 @@ public:
     void TickFrame();
     /// Captures the next frame into `directory` for the debug server, which is told `id` once
     /// the manifest is complete. Works without EDEN_NX2_FRAME_DUMP.
-    void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id);
+    void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id,
+             bool geometry = false, std::vector<u64> geometry_shaders = {});
 
 private:
     enum class DepthEncoding { None, Unorm16, Unorm24, Float32 };
@@ -248,6 +274,9 @@ private:
     std::vector<std::tuple<u64, GPUVAddr, u32>> dispatch_sampled;
     /// (shader hash, storage, binding index, device address, size) already recorded this frame.
     std::vector<std::tuple<u64, bool, u32, u64, u32>> seen_buffers;
+    bool geometry{};
+    std::vector<u64> geometry_shaders;
+    std::vector<std::tuple<u32, u64, u32>> seen_geometry;
     /// Content hashes of the buffer files written; writer thread only.
     std::vector<u64> written_buffers;
     u32 pass_index{};
