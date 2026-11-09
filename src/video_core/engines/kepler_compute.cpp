@@ -369,11 +369,16 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                 if (!memory_manager.IsFullyMappedRange(address, four_words ? 16 : sizeof(payload))) return false;
                 if (flags & (1U << 26)) {
                     rasterizer->SignalFence([this, address, payload, flags] {
-                        const u32 value = ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1,
-                                                          memory_manager.Read<u32>(address), payload);
+                        const auto combine = [&](u32 current) {
+                            return ReduceSemaphore((flags >> 20) & 7, (flags >> 24) & 1, current, payload);
+                        };
+                        const u32 guest = memory_manager.Read<u32>(address);
+                        const u32 value = combine(guest);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
-                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+                                *device, Tegra::Nx2MirrorShadow::Get().NoteCombinedRelease(
+                                             *device, address, guest, value, combine));
                         }
                         static const u64 watch = [] {
                             const char* text = std::getenv("EDEN_NX2_SEM_WATCH");
@@ -394,10 +399,14 @@ bool KeplerCompute::ProcessNativeMethod(Core::System& system, u32 method, u32 ar
                     // releases also advance: a plain write would move it backwards and leave
                     // GEQ acquires waiting forever.
                     rasterizer->SignalFence([this, address, payload] {
-                        const u32 value = (std::max)(memory_manager.Read<u32>(address), payload);
+                        const auto combine = [payload](u32 current) { return (std::max)(current, payload); };
+                        const u32 guest = memory_manager.Read<u32>(address);
+                        const u32 value = combine(guest);
                         memory_manager.Write<u32>(address, value);
                         if (const auto device = memory_manager.GpuToCpuAddress(address)) {
-                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(*device, value);
+                            Tegra::Nx2SemaphoreWaiters::Get().OnWrite(
+                                *device, Tegra::Nx2MirrorShadow::Get().NoteCombinedRelease(
+                                             *device, address, guest, value, combine));
                         }
                     });
                 } else {
