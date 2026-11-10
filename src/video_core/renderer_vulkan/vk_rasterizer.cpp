@@ -3653,8 +3653,10 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
     return frame_dump.NoteBuffers(compute, shader_hashes, buffers);
 }
 
+// GCC reports a static constexpr local used only inside a generic lambda as unused.
+static constexpr u32 GEOMETRY_CAP = 16U << 20;
+
 bool RasterizerVulkan::FrameDumpGeometry(std::span<const u64> shader_hashes, bool is_indexed) {
-    static constexpr u32 GEOMETRY_CAP = 16U << 20;
     std::vector<FrameDump::GeometryBuffer> buffers;
     buffer_cache.ForEachBoundGeometryBuffer(is_indexed, [&](u32 slot, const auto& binding,
                                                             const auto* host, u32 host_offset,
