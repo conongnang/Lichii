@@ -29,6 +29,8 @@
 
 #include <fmt/format.h>
 
+// Before any Vulkan header: X11 defines Success, which NvResult uses.
+#include "core/hle/service/nvdrv/nvdata.h"
 #include "video_core/renderer_vulkan/vk_fsr4_upscaler.h"
 #include "video_core/renderer_vulkan/renderer_vulkan.h"
 
