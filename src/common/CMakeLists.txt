@@ -280,3 +280,8 @@ if(ANDROID)
 endif()
 
 create_target_directory_groups(common)
+
+option(LICHII_NO_LOG "Play build: write no log file and drop messages below Critical" OFF)
+if (LICHII_NO_LOG)
+    target_compile_definitions(common PRIVATE LICHII_NO_LOG)
+endif()

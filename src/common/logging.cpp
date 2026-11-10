@@ -431,8 +431,13 @@ void Initialize() {
         LOG_WARNING(Log, "Reinitializing logging backend");
     } else {
         logging_instance.emplace();
+#ifdef LICHII_NO_LOG
+        // Play build: no log file, and only critical messages reach the other backends.
+        logging_instance->filter.ParseFilterString("*:Critical");
+#else
         logging_instance->filter.ParseFilterString(Settings::values.log_filter.GetValue());
-#ifndef __OPENORBIS__
+#endif
+#if !defined(__OPENORBIS__) && !defined(LICHII_NO_LOG)
         using namespace Common::FS;
         const auto& log_dir = GetEdenPath(EdenPath::LogDir);
         void(CreateDir(log_dir));
@@ -473,6 +478,9 @@ void FmtCrashMessageImpl(const char* filename, unsigned int line_num, const char
 }
 
 void SetGlobalFilter(const Filter& filter) {
+#ifdef LICHII_NO_LOG
+    return;
+#endif
     if (logging_instance)
         logging_instance->filter = filter;
 }
