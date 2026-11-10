@@ -84,6 +84,8 @@ public:
         return BankBase::IsDead() && scheduler.IsFree(last_used_tick);
     }
 
+    /// Reads `size` results from slot `start` into host_results, for a host read: waiting for
+    /// them, except on AMD's proprietary driver.
     void Sync(size_t start, size_t size) {
         const auto& dev = device.GetLogical();
         // AMD's driver: read what is available without blocking; a result that has not landed
@@ -156,6 +158,8 @@ struct HostSyncValues {
 
 class SamplesStreamer : public BaseStreamer {
 public:
+    /// Makes the prefix scan pass and, on AMD's proprietary driver, the pass that resolves
+    /// results copied with their availability.
     explicit SamplesStreamer(size_t id_, QueryCacheRuntime& runtime_,
                              VideoCore::RasterizerInterface* rasterizer_, TextureCache& texture_cache_, const Device& device_,
                              Scheduler& scheduler_, const MemoryAllocator& memory_allocator_,
@@ -266,6 +270,7 @@ public:
         return !pending_sync.empty();
     }
 
+    /// Writes the results PresyncWrites copied to their guest addresses.
     void SyncWrites() override {
         if (sync_values_stash.empty()) {
             return;
@@ -279,6 +284,8 @@ public:
         sync_values_stash.clear();
     }
 
+    /// Copies the results of the queries waiting for a sync from their banks into a resolve
+    /// buffer, on the GPU, and stashes where SyncWrites writes them.
     void PresyncWrites() override {
         if (pending_sync.empty()) {
             return;

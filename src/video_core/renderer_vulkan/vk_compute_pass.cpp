@@ -540,6 +540,7 @@ void ConditionalRenderingResolvePass::Resolve(VkBuffer dst_buffer, VkBuffer src_
     });
 }
 
+// The pass of resolve_query_availability.comp: one descriptor set of two storage buffers.
 QueryAvailabilityResolvePass::QueryAvailabilityResolvePass(
     const Device& device_, Scheduler& scheduler_, DescriptorPool& descriptor_pool_,
     ComputePassDescriptorQueue& compute_pass_descriptor_queue_)
@@ -548,6 +549,8 @@ QueryAvailabilityResolvePass::QueryAvailabilityResolvePass(
                   COMPUTE_PUSH_CONSTANT_RANGE<sizeof(u32)>, RESOLVE_QUERY_AVAILABILITY_COMP_SPV),
       scheduler{scheduler_}, compute_pass_descriptor_queue{compute_pass_descriptor_queue_} {}
 
+// Resolves `count` results copied with their availability into `dst_buffer`: a query's count
+// when it had landed, a visible 1024 samples otherwise.
 void QueryAvailabilityResolvePass::Resolve(VkBuffer dst_buffer, VkDeviceSize dst_offset,
                                            VkBuffer src_buffer, VkDeviceSize src_offset,
                                            u32 count) {
