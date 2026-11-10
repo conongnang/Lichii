@@ -2147,7 +2147,14 @@ void TextureCache<P>::RefreshContents(Image& image, ImageId image_id) {
 
     // Made where a dropped GPU-written image left stale bytes (MarkStale): nothing to upload.
     // Pages the buffer cache wrote on the GPU may hold data written back since: upload those.
-    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
+    // Off unless EDEN_NX2_TC_SKIP_STALE=1: in Ocarina of Time the skipped image keeps whatever the
+    // host memory held, and the fog and bloom read it as white blobs after long sessions, once the
+    // collector has dropped GPU-written images (port of CheezerWheezer/Lichii 132cc46c9e).
+    static const bool skip_stale = [] {
+        const char* value = std::getenv("EDEN_NX2_TC_SKIP_STALE");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (skip_stale && Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image.dirty_layers.empty() &&
         False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
                              ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked)) &&
         stale_pages.IsAll(image.cpu_addr, image.guest_size_bytes)) {
