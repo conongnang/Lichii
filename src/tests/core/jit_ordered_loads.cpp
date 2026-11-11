@@ -253,6 +253,46 @@ TEST_CASE("Exclusive and atomic updates still store through plain loads", "[jit_
     REQUIRE(Load(arena, Writable) == 142);
 }
 
+TEST_CASE("Each processor keeps its own reservation", "[jit_ordered_loads]") {
+    Arena arena;
+    Store(arena, Writable, 7);
+
+    // Inline exclusives on the last processor of the monitor.
+    Environment env;
+    env.memory = arena.base;
+    env.code = {Ldaxr(3, 0, 1), AddX1X1One, Stlxr(3, 2, 0, 1), Svc};
+    Dynarmic::ExclusiveMonitor monitor{4};
+    Dynarmic::A64::Jit jit{Config(env, monitor, 3)};
+    jit.SetRegister(0, Writable);
+    jit.SetRegister(2, ~0ULL);
+    Run(env, jit);
+    REQUIRE(jit.GetRegister(2) == 0);
+    REQUIRE(Load(arena, Writable) == 8);
+
+    // The monitor's own interface, as the kernel uses it: a store through one processor's
+    // reservation ends the others' on that address and leaves the rest.
+    const auto mark = [&](size_t processor, u64 address) {
+        return monitor.ReadAndMark<u64>(processor, address, [&] { return Load(arena, address); });
+    };
+    const auto store = [&](size_t processor, u64 address) {
+        u64 saved{};
+        const bool stored =
+            monitor.DoExclusiveOperation<u64>(processor, address, [&](u64 expected) {
+                saved = expected;
+                return true;
+            });
+        return stored ? saved : ~0ULL;
+    };
+    Store(arena, Writable + 8, 21);
+    REQUIRE(mark(0, Writable) == 8);
+    REQUIRE(mark(1, Writable) == 8);
+    REQUIRE(mark(2, Writable + 8) == 21);
+    REQUIRE(store(1, Writable) == 8);
+    REQUIRE(store(0, Writable) == ~0ULL);
+    REQUIRE(store(2, Writable + 8) == 21);
+    REQUIRE(store(2, Writable + 8) == ~0ULL);
+}
+
 TEST_CASE("Ordered load microbenchmark", "[.jit_ordered_load_benchmark]") {
     constexpr u64 Iterations = 20'000'000;
     struct Loop {
@@ -264,8 +304,18 @@ TEST_CASE("Ordered load microbenchmark", "[.jit_ordered_load_benchmark]") {
         Loop{"LDAPR", Ldapr(3, 0, 1)},
         Loop{"LDADDAL", Ldaddal(3, 3, 0, 4)},
     };
+    struct Case {
+        size_t threads;
+        bool shared;
+    };
+    constexpr std::array cases{Case{1, true}, Case{2, true}, Case{4, true}, Case{2, false},
+                               Case{4, false}};
     for (const Loop& loop : loops) {
-        for (const size_t threads : {size_t{1}, size_t{2}, size_t{4}}) {
+        // Sharing one word shows the instruction's own cost between cores; a word each, a page
+        // apart, shows what the cores share besides guest memory.
+        for (const Case& test : cases) {
+            const size_t threads = test.threads;
+            const bool shared = test.shared;
             Arena arena;
             Dynarmic::ExclusiveMonitor monitor{threads};
             std::atomic<bool> start{};
@@ -277,8 +327,7 @@ TEST_CASE("Ordered load microbenchmark", "[.jit_ordered_load_benchmark]") {
                     env.memory = arena.base;
                     env.code = {loop.instruction, SubsX2X2One, BranchNotEqualBack2, Svc};
                     Dynarmic::A64::Jit jit{Config(env, monitor, thread)};
-                    // Every thread loads the same word, as guest cores polling one flag do.
-                    jit.SetRegister(0, Writable);
+                    jit.SetRegister(0, shared ? Writable : Writable + thread * 0x1000);
                     jit.SetRegister(2, Iterations);
                     jit.SetRegister(3, 1);
                     while (!start.load(std::memory_order_acquire)) {
@@ -297,8 +346,8 @@ TEST_CASE("Ordered load microbenchmark", "[.jit_ordered_load_benchmark]") {
                 workers[thread].join();
                 total += nanoseconds[thread];
             }
-            std::printf("%-8s %zu thread(s) on one word: %.2f ns per iteration\n", loop.name,
-                        threads, total / static_cast<double>(threads));
+            std::printf("%-8s %zu thread(s) on %s: %.2f ns per iteration\n", loop.name, threads,
+                        shared ? "one word" : "a word each", total / static_cast<double>(threads));
         }
     }
 }
