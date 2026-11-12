@@ -74,15 +74,17 @@ using VideoCore::Surface::IsPixelFormatSRGB;
 using VideoCore::Surface::SurfaceType;
 
 namespace {
-/// Deleted render targets' VkImages are kept for the next image made with the same create info
-/// (from Frizti's Fritchii, EXP42), dedicated allocations included: Ocarina of Time rebinds its
-/// post-processing targets at the same memory in a fixed set of shapes, and a camera pan in Castle
-/// Town made ~4,000 images a 600 frames; the pool served 82% of them (pan 68.9 -> 72.2 fps, worst
-/// frame 26-30 -> 20-24 ms, 3 runs each). EDEN_NX2_IMAGE_POOL=0 off, =1 suballocated images only.
+/// Deleted render targets' VkImages kept for the next image made with the same create info (from
+/// Frizti's Fritchii, EXP42), dedicated allocations included with =2: Ocarina of Time rebinds its
+/// post-processing targets at the same memory in a fixed set of shapes, and the pool served 82% of
+/// a Castle Town pan's ~4,000 images a 600 frames (pan 68.9 -> 72.2 fps, 3 runs each). Off by
+/// default: play builds with =2 crashed in amdvlk64.dll's vkCreateFramebuffer (a clear's render
+/// targets) after 2-4 minutes of play (2026-11-12), not yet tied to the pool or ruled out.
+/// EDEN_NX2_IMAGE_POOL=1 suballocated images only, =2 dedicated ones too.
 int ImagePoolMode() {
     static const int mode = [] {
         const char* value = std::getenv("EDEN_NX2_IMAGE_POOL");
-        return value != nullptr ? std::atoi(value) : 2;
+        return value != nullptr ? std::atoi(value) : 0;
     }();
     return mode;
 }
