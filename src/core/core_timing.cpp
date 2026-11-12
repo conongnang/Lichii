@@ -8,7 +8,11 @@
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <tuple>
+#if defined(_M_X64) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 #include "common/cpu_features.h"
 #include "common/cpu_features.h"
 
@@ -104,6 +108,15 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
             };
 #endif
             has_started = true;
+            // Windows timed waits end ~0.4-0.5 ms late even with the high resolution timer: OoT's
+            // job workers sleep 20 us between polls for work and woke after 440 us at the median,
+            // 22 times a frame (7.9 ms of sleep a frame where 0.44 ms was asked), and the presenter's
+            // 1 ms poll of the GPU took 1.36 ms. Events closer than this are spun to instead.
+            // Experiment switch: EDEN_NX2_TIMER_SPIN_US=<us> (0 = the plain timed wait).
+            const s64 spin_ns = [] {
+                const char* const value = std::getenv("EDEN_NX2_TIMER_SPIN_US");
+                return (value != nullptr ? std::strtoll(value, nullptr, 10) : 1000LL) * 1000;
+            }();
 
             // base frequency in MHz: 1ns (10^-9) = 1GHz (10^9)
             while (!stop_token.stop_requested()) {
@@ -112,15 +125,19 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
                     if (auto const next_time = Advance(); next_time) {
                         // There are more events left in the queue, wait until the next event.
                         auto const wait_time = *next_time - GetGlobalTimeNs().count();
-                        if (wait_time > 0) {
+                        if (wait_time > spin_ns) {
+                            // Wakes up to spin_ns early and spins the rest (next iteration).
+                            const auto os_wait = std::chrono::nanoseconds(wait_time - spin_ns);
 #ifdef _WIN32
                             // A high resolution timer keeps the guest's events (vsync among them)
                             // on time even where Windows doesn't honour our timer resolution
                             // request (Windows 11: players gained ~30% fps from making it global).
-                            if (!Common::Windows::WaitHighResolution(
-                                    hires_timer, wake_handle, std::chrono::nanoseconds(wait_time)))
+                            if (!Common::Windows::WaitHighResolution(hires_timer, wake_handle,
+                                                                     os_wait))
 #endif
-                                event.WaitFor(std::chrono::nanoseconds(wait_time));
+                                event.WaitFor(os_wait);
+                        } else if (wait_time > 0) {
+                            SpinUntil(*next_time, stop_token);
                         }
                     } else {
                         // Queue is empty, wait until another event is scheduled and signals us to
@@ -134,6 +151,21 @@ void CoreTiming::Initialize(std::function<void()>&& on_thread_init_) {
                 pause_event.Wait();
             }
         });
+    }
+}
+
+void CoreTiming::SpinUntil(s64 deadline_ns, std::stop_token stop_token) {
+    while (GetGlobalTimeNs().count() < deadline_ns) {
+        // An event scheduled sooner, a pause or a stop: back to the loop.
+        if (event.IsSet() || paused || stop_token.stop_requested()) {
+            event.Reset();
+            return;
+        }
+#if defined(_M_X64) || defined(__x86_64__)
+        _mm_pause();
+#else
+        std::this_thread::yield();
+#endif
     }
 }
 

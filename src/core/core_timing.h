@@ -157,6 +157,8 @@ public:
 #endif
     /// Wakes the timer thread: `event`, and on Windows the high resolution wait's wake handle.
     void Wake();
+    /// Timer thread: spins until the global time reaches deadline_ns, or `event` is set.
+    void SpinUntil(s64 deadline_ns, std::stop_token stop_token);
     u64 event_fifo_id = 0;
     std::atomic<s64> pause_end_time{};
     /// Cycle timing
