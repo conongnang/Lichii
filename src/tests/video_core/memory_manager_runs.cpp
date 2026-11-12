@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <exception>
 #include <limits>
 #include <random>
+#include <thread>
 #include <vector>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -256,4 +259,23 @@ TEST_CASE("Reads of GPU pages over unmapped device memory return zeros", "[memor
     std::ranges::fill(bytes, u8{0xcd});
     memory.ReadBlock(window, bytes.data(), size);
     REQUIRE(std::ranges::all_of(bytes, [](u8 value) { return value == 0; }));
+}
+
+TEST_CASE("Device unmaps wait for deferred page count changes", "[memory_manager]") {
+    Core::DeviceMemory physical;
+    Tegra::MaxwellDeviceMemoryManager device_memory{physical};
+    NullRasterizer rasterizer;
+    device_memory.BindInterface(&rasterizer);
+
+    device_memory.BeginDeferredCachedUpdates();
+    std::atomic<bool> unmapped{};
+    std::thread unmapper{[&] {
+        device_memory.Unmap(0x10000, 0x1000);
+        unmapped = true;
+    }};
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_FALSE(unmapped);
+    device_memory.EndDeferredCachedUpdates();
+    unmapper.join();
+    REQUIRE(unmapped);
 }

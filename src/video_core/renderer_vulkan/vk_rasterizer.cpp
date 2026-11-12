@@ -2629,8 +2629,40 @@ void RasterizerVulkan::InnerInvalidation(std::span<const std::pair<DAddr, std::s
 bool RasterizerVulkan::OnCPUWrite(DAddr addr, u64 size) {
     DEBUG_ASSERT(addr != 0 || size != 0);
     {
-        std::scoped_lock lock{buffer_cache.mutex};
-        if (buffer_cache.OnCPUWrite(addr, size)) {
+        // The pages the write untracks change their host protection after the lock is dropped:
+        // drawing waited for those system calls (~1 µs each, thousands a second at Ocarina of
+        // Time's water). A write trapping on a page still protected until then finds the page
+        // already untracked and changes nothing. Off the scheduler's owner the write only
+        // untracks pages (BufferCache::WriteMemory uploads only on the owner), which is all that
+        // may wait. Device unmaps wait for these changes, as one applied to an unmapped page is
+        // lost (BeginDeferredCachedUpdates).
+        static thread_local VideoCommon::DeferredPageCaching deferred;
+        // EDEN_NX2_DEFER_PROTECT=0 changes the protection under the lock (A/B switch).
+        static const bool defer_enabled = [] {
+            const char* value = std::getenv("EDEN_NX2_DEFER_PROTECT");
+            return value == nullptr || value[0] != '0';
+        }();
+        const bool defer = defer_enabled && VideoCommon::t_deferred_page_caching == nullptr &&
+                           !VideoCommon::GpuSplit::OwnsScheduler();
+        bool gpu_modified;
+        {
+            std::scoped_lock lock{buffer_cache.mutex};
+            if (defer) {
+                VideoCommon::t_deferred_page_caching = &deferred;
+            }
+            gpu_modified = buffer_cache.OnCPUWrite(addr, size);
+            if (defer) {
+                VideoCommon::t_deferred_page_caching = nullptr;
+                if (!deferred.Empty()) {
+                    device_memory.BeginDeferredCachedUpdates();
+                }
+            }
+        }
+        if (defer && !deferred.Empty()) {
+            deferred.ApplyAll();
+            device_memory.EndDeferredCachedUpdates();
+        }
+        if (gpu_modified) {
             return true;
         }
     }
