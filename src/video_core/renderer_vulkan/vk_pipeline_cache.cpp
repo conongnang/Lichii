@@ -52,6 +52,8 @@
 #include "video_core/renderer_vulkan/vk_cooperative_hmma_test.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "common/memory_detect.h"
+#include "video_core/renderer_vulkan/pipeline_eviction_policy.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache_records.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -1903,55 +1905,89 @@ void PipelineCache::EvictUnusedPipelines() {
     if (PreloadAllPipelines()) {
         return;
     }
-    // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
-    // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
-    // this long is destroyed; rebuilding it later requires a full GPU-thread shader translation
-    // (~8.5 ms each) plus a driver pipeline cache hit.
     constexpr u64 EvictAfterFrames = 9000;
     if (frame_count <= EvictAfterFrames) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
-    const u64 tick = scheduler.CurrentTick();
-    // ~0.9 GB of driver memory at ~0.45 MB each.
-    constexpr size_t MaxUnusedPrebuiltPipelines = 2000;
-    size_t kept_prebuilt = 0;
-    size_t evicted = 0;
-    for (auto it = graphics_cache.begin(); it != graphics_cache.end();) {
-        GraphicsPipeline* const pipeline = it->second.get();
-        if (pipeline == nullptr || pipeline == current_pipeline || !pipeline->IsBuilt() ||
-            pipeline->LastUse() >= cutoff) {
-            ++it;
-            continue;
+    // An evicted pipeline used again is translated again on the GPU thread (~8.5 ms) and built
+    // from the driver's pipeline cache, and a place visited again after a few minutes needs
+    // hundreds of them at once (OoT: 8,158 rebuilt in 80 min, multi-second freezes). So they go
+    // only past the pipelines that fit in a quarter of the RAM, least recently used first; a
+    // prebuilt one no draw has used counts as used at boot (port of zortos293/Lichii#1334).
+    // Android keeps the frame-based eviction. Experiment switch: EDEN_NX2_RAM_EVICTION=0 brings
+    // back the 9000-frame eviction everywhere.
+    static const size_t kept = [] {
+#ifdef __ANDROID__
+        return size_t{0};
+#else
+        const char* value = std::getenv("EDEN_NX2_RAM_EVICTION");
+        if (value != nullptr && value[0] == '0') {
+            return size_t{0};
         }
+        return KeptPipelinesForMemory(Common::GetMemInfo().TotalPhysicalMemory);
+#endif
+    }();
+    std::vector<GraphicsPipelineCacheKey> evict;
+    if (kept != 0) {
+        const size_t built = static_cast<size_t>(
+            std::ranges::count_if(graphics_cache, [](const auto& entry) {
+                return entry.second != nullptr && entry.second->IsBuilt();
+            }));
+        if (built <= kept) {
+            return;
+        }
+        std::vector<GraphicsPipelineCacheKey> keys;
+        std::vector<u64> last_uses;
+        for (const auto& [key, pipeline] : graphics_cache) {
+            if (pipeline != nullptr && pipeline.get() != current_pipeline && pipeline->IsBuilt() &&
+                pipeline->LastUse() < cutoff) {
+                keys.push_back(key);
+                last_uses.push_back(pipeline->WasUsed() ? pipeline->LastUse() : 0);
+            }
+        }
+        for (const size_t index : PipelinesToEvict(last_uses, built, kept)) {
+            evict.push_back(keys[index]);
+        }
+    } else {
         // A pipeline built from the disk cache at boot that no draw has used yet stays, up to a
-        // budget: evicting it throws the prebuild away, and the game translates it again on the
-        // GPU thread when it reaches that content (OoT: 1174 of 1346 evicted on the title screen,
-        // 684 rebuilt in 10 s on entering the field). Past the budget they go like the rest, so a
-        // large cache can't hold their driver memory for the whole session.
-        if (!pipeline->WasUsed() && kept_prebuilt < MaxUnusedPrebuiltPipelines) {
-            ++kept_prebuilt;
-            ++it;
-            continue;
+        // budget (~0.9 GB of driver memory at ~0.45 MB each): evicting it throws the prebuild
+        // away (OoT: 1174 of 1346 evicted on the title screen, 684 rebuilt in 10 s on entering
+        // the field).
+        constexpr size_t MaxUnusedPrebuiltPipelines = 2000;
+        size_t kept_prebuilt = 0;
+        for (const auto& [key, pipeline] : graphics_cache) {
+            if (pipeline == nullptr || pipeline.get() == current_pipeline ||
+                !pipeline->IsBuilt() || pipeline->LastUse() >= cutoff) {
+                continue;
+            }
+            if (!pipeline->WasUsed() && kept_prebuilt < MaxUnusedPrebuiltPipelines) {
+                ++kept_prebuilt;
+                continue;
+            }
+            evict.push_back(key);
         }
-        if (used_this_session.erase(pipeline) != 0) {
+    }
+    if (evict.empty()) {
+        return;
+    }
+    const u64 tick = scheduler.CurrentTick();
+    for (const GraphicsPipelineCacheKey& key : evict) {
+        const auto it = graphics_cache.find(key);
+        if (used_this_session.erase(it->second.get()) != 0) {
             used_and_evicted.insert(it->first.Hash());
         }
-        evicted_pointer_slots.Remember(it->first.Hash(), pipeline->MappedPointers());
+        evicted_pointer_slots.Remember(it->first.Hash(), it->second->MappedPointers());
         evicted_pipelines.emplace_back(tick, std::move(it->second));
-        it = graphics_cache.erase(it);
-        ++evicted;
-    }
-    if (evicted == 0) {
-        return;
+        graphics_cache.erase(it);
     }
     for (auto& [key, pipeline] : graphics_cache) {
         if (pipeline) {
             pipeline->ClearTransitions();
         }
     }
-    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left", evicted,
-             EvictAfterFrames, graphics_cache.size());
+    LOG_INFO(Render_Vulkan, "Evicted {} graphics pipelines unused for {} frames, {} left",
+             evict.size(), EvictAfterFrames, graphics_cache.size());
 }
 
 namespace {
