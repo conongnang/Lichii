@@ -184,8 +184,52 @@ class TextureCache : public VideoCommon::ChannelSetupCaches<TextureCacheChannelI
     u64 astc_alpha_images{};
     Common::ScratchBuffer<u8> astc_scan_buffer;
     u64 images_deleted{};
+    // Region changes (TickFrame): a load shows up as a burst of new images. Once it is large
+    // enough, images not used since it began belong to the regions left behind and are trimmed
+    // during the load, instead of piling up until the collector evicts them mid-play.
+    u64 frame_created_bytes{};  ///< Device memory of the images made this frame
+    bool scene_burst{};
+    bool scene_burst_trimmed{}; ///< This burst already started a trim
+    u64 scene_burst_start{};    ///< Frame the burst began
+    u64 scene_burst_end{};      ///< Frame the last burst settled
+    u64 scene_burst_bytes{};
+    u64 scene_quiet_frames{};   ///< Frames since the burst last made enough images
+    u64 scene_trim_before{};    ///< Trim images last used at or before this frame; 0 = no trim
+    u64 scene_trim_target{};    ///< Device memory the trim stops at
+    u64 scene_trim_frames{};
+    /// Images trims deleted (ImageShapeKey) and when, to count the ones made again soon after.
+    std::unordered_map<u64, u64> trimmed_shapes;
+    static constexpr u64 RemadeWindowFrames = 3600;
+    u64 remade_images{};
+    u64 remade_bytes{};
+    [[nodiscard]] static u64 ImageShapeKey(const ImageInfo& info, GPUVAddr gpu_addr) noexcept {
+        return ((u64{static_cast<u32>(info.format)} << 56) |
+                (u64{static_cast<u32>(info.type)} << 52) |
+                (u64{static_cast<u32>(info.resources.levels) & 0xF} << 48) |
+                (u64{static_cast<u32>(info.resources.layers) & 0xFFF} << 36) |
+                (u64{info.size.width & 0x3FFFF} << 18) | (info.size.height & 0x3FFFF)) ^
+               (gpu_addr * 0x9E3779B97F4A7C15ULL);
+    }
+    u64 scene_trim_images{};
+    u64 scene_trim_start_memory{};
     std::map<u64, std::pair<u32, GPUVAddr>> created_shapes;
     bool debug_stats{}; ///< Collect what only the debug statistics lines use
+    /// Render targets their lookup created, to check for early deletion (EvictDeadRenderTargets),
+    /// with their allocation tick and how often they were found still in use.
+    struct TransientTarget {
+        ImageId id;
+        u64 allocation_tick;
+        u64 check_tick;
+        u32 survived;
+    };
+    std::deque<TransientTarget> transient_targets;
+    u64 transient_evictions{};
+    u64 logged_transient_evictions{};
+    /// Image made by the latest JoinImages call; FindRenderTargetView uses it to tell a target it
+    /// just created from one that already existed.
+    ImageId last_created_image{};
+    /// Deletes dead render targets early while the cache is over its minimum size.
+    void EvictDeadRenderTargets();
 
     static constexpr s64 DEFAULT_EXPECTED_MEMORY = 1_GiB + 125_MiB;
     static constexpr s64 DEFAULT_CRITICAL_MEMORY = 1_GiB + 625_MiB;
@@ -466,7 +510,9 @@ private:
     void OnGPUASRegister(size_t map_id) final override;
 
     /// Runs the Garbage Collector.
-    void RunGarbageCollector(bool out_of_memory);
+    /// With trim_before, evicts only images last used at or before that frame, whatever the
+    /// thresholds (a region change, TickFrame).
+    void RunGarbageCollector(bool out_of_memory, u64 trim_before = 0);
 
     /// Find or create an image view in the guest descriptor table
     ImageViewId VisitImageView(u32 index, bool compute);
