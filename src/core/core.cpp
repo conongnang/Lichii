@@ -479,7 +479,12 @@ struct System::Impl {
         // Before the cores start: they read it from their JIT without a lock. Not with a single
         // core (no idle core to compile on) or the debugger, nor where any core's backend lacks
         // it (NCE, 32-bit processes, dynarmic's non-x64 backends).
-        if (kernel.IsMulticore() && !system.DebuggerEnabled()) {
+        // Opt-in experiment (EDEN_NX2_JIT_WARMUP=1): in OoT Castle Town it precompiled 645k
+        // blocks (170 MiB of code per core) and cost ~6 fps standing and ~8 fps walking, for a
+        // 3 s faster load (2026-11-12).
+        const char* const warmup_switch = std::getenv("EDEN_NX2_JIT_WARMUP");
+        const bool warmup_wanted = warmup_switch != nullptr && warmup_switch[0] == '1';
+        if (warmup_wanted && kernel.IsMulticore() && !system.DebuggerEnabled()) {
             Kernel::KProcess* const kprocess = process->GetHandle();
             bool supported = true;
             for (size_t core = 0; core < Core::Hardware::NUM_CPU_CORES; ++core) {

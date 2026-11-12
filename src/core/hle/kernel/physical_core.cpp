@@ -255,12 +255,7 @@ void PhysicalCore::Idle(KernelCore& kernel) {
     // JIT warm-up: compile listed code on this core's thread, in slices that end as soon as a
     // thread is ready to run here (checked before every block), in place of the spin while
     // there is any.
-    // Experiment switch for #1225: EDEN_NX2_JIT_WARMUP=0 turns the warm-up off.
-    static const bool jit_warmup = [] {
-        const char* value = std::getenv("EDEN_NX2_JIT_WARMUP");
-        return value == nullptr || value[0] != '0';
-    }();
-    if (jit_warmup && !m_is_single_core) {
+    if (!m_is_single_core) {
         if (KProcess* const process = kernel.ApplicationProcess(); process != nullptr) {
             if (Core::ArmInterface* const arm = process->GetArmInterface(m_core_index)) {
                 while (!m_is_interrupted.load(std::memory_order_acquire) &&
