@@ -92,6 +92,11 @@ public:
     /// Advances the frame window of EDEN_NX2_UPSCALER_TRACE
     static void TickUpscalerTrace();
 
+    /// Whether the driver build has finished (or failed: then IsBound is false)
+    [[nodiscard]] bool IsBuilt() const noexcept {
+        return is_built.load(std::memory_order::acquire);
+    }
+
     /// Whether no build of this pipeline is left queued on a worker thread, which holds it
     [[nodiscard]] bool IsBuildTaskDone() const noexcept {
         return build_task_done.load(std::memory_order::acquire);

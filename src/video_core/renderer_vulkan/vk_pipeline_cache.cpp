@@ -970,26 +970,61 @@ ComputePipeline* PipelineCache::CurrentComputePipeline(u64& native_key) {
     };
     const auto [pair, is_new]{compute_cache.try_emplace(key)};
     auto& entry{pair->second};
+    const auto replace = [&](ComputePipelineCacheEntry&& rebuilt) {
+        if (entry.pipeline) {
+            retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
+                                                   std::move(entry.pipeline));
+        }
+        rebuilt.rebuilds = entry.rebuilds + 1;
+        entry = std::move(rebuilt);
+    };
+    // A rebuild compiles on a worker while the current translation keeps running (port of
+    // zortos293/Lichii#995: the dispatch waiting for it froze Hyrule Field for 2-3.4 s).
+    // Experiment switch: EDEN_NX2_COMPUTE_REBUILD_ASYNC=0 installs it at once again.
+    static const bool async_rebuild = [] {
+        const char* value = std::getenv("EDEN_NX2_COMPUTE_REBUILD_ASYNC");
+        return value == nullptr || value[0] != '0';
+    }();
     if (is_new) {
         entry = CreateComputePipeline(key, shader);
+    } else if (entry.pending_rebuild) {
+        if (entry.pending_rebuild->pipeline->IsBuilt()) {
+            auto rebuilt{std::move(*entry.pending_rebuild)};
+            entry.pending_rebuild.reset();
+            if (rebuilt.pipeline->IsBound()) {
+                replace(std::move(rebuilt));
+            } else {
+                LOG_WARNING(Render_Vulkan,
+                            "Keeping compute shader {:016x}: rebuild failed to compile",
+                            key.unique_hash);
+                retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
+                                                       std::move(rebuilt.pipeline));
+                entry.rebuilds = MaxComputeRebuilds;
+            }
+        }
     } else if (!entry.null_pointer_slots.empty() && entry.rebuilds < MaxComputeRebuilds &&
                StaleNullPointerSlot(entry)) {
         // The translation dropped accesses through a pointer that was null back then. Which slots
         // the game fills depends on the area, so the new one keeps binding every pointer this one
         // binds, null now or not: a null pointer binds nothing.
         auto rebuilt{CreateComputePipeline(key, shader, entry.mapped_pointers)};
-        if (rebuilt.pipeline) {
-            if (entry.pipeline) {
-                retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
-                                                       std::move(entry.pipeline));
-            }
-            rebuilt.rebuilds = entry.rebuilds + 1;
-            entry = std::move(rebuilt);
+        if (async_rebuild && rebuilt.pipeline && entry.pipeline && !rebuilt.pipeline->IsBuilt()) {
+            entry.pending_rebuild =
+                std::make_unique<ComputePipelineCacheEntry>(std::move(rebuilt));
+        } else if (rebuilt.pipeline &&
+                   (!async_rebuild || !entry.pipeline || rebuilt.pipeline->IsBound())) {
+            replace(std::move(rebuilt));
         } else {
             // Keep the working translation when the new one cannot be built (for example a
-            // narrow access that now stays global across two buffers), and stop retrying.
+            // narrow access that now stays global across two buffers) or its driver compile
+            // already failed, and stop retrying.
             LOG_WARNING(Render_Vulkan, "Keeping compute shader {:016x}: rebuild failed: {}",
-                        key.unique_hash, rebuilt.failure);
+                        key.unique_hash,
+                        rebuilt.pipeline ? std::string{"driver compile failed"} : rebuilt.failure);
+            if (rebuilt.pipeline) {
+                retired_compute_pipelines.emplace_back(scheduler.CurrentTick(),
+                                                       std::move(rebuilt.pipeline));
+            }
             entry.rebuilds = MaxComputeRebuilds;
         }
     }
