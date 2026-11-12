@@ -122,7 +122,9 @@ the limit:
   in this scene.
 - `EDEN_NX2_TC_MIN_AGE=600` (collector keeps images 600 frames) changed neither creation during
   the pan nor fps (68.0 vs 68.6, 3 runs each): the pan's deletions are not the collector's.
-- Part 1, first step (574fe6a469, on by default): the image pool from Fritchii EXP42, extended to
+- Part 1, first step (574fe6a469; **off by default since b402a2bc65**: with it on, play builds
+  crashed in amdvlk64.dll inside `vkCreateFramebuffer` for a clear's render targets after 2-4
+  minutes of play, and turning it off ended the crashes): the image pool from Fritchii EXP42, extended to
   dedicated allocations, gives a new target a recycled VkImage of the same create info. During the
   pan it served 4,158 of 5,040 image creations (82%); pan 68.9 -> 72.2 fps, worst frame 26-30 ->
   20-24 ms (3 runs each); standing unchanged (68.0 vs 67.7). With it, the pan adds only ~12 ms/s
