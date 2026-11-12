@@ -642,8 +642,24 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
                 continue;
             }
         }
+        // Where each record is written. A code cave record whose padding a user mod has taken
+        // moves to free padding in the same 4 KiB page (its routine is position independent but
+        // for adrp, which only needs the page), and branch records into it follow. Ocarina's
+        // Hyrule-Cheat-Menu puts its hook stubs at main+0x3C46280, inside FPS Unlock's routine
+        // and on Texture Pool x2's, so both were skipped and the game ran on Dark's routine.
+        std::vector<size_t> placed(patch.records.size());
+        const auto& text = header.segments[0];
+        const u64 text_end = u64{text.location} + text.size;
+        const u64 executable_end =
+            (std::min)((text_end + 0xFFF) & ~u64{0xFFF}, u64{header.segments[1].location});
+        const auto zero = [](const std::vector<u8>& data, u64 module_offset, u64 size) {
+            const auto begin = data.begin() + sizeof(Loader::NSOHeader) + module_offset;
+            return std::all_of(begin, begin + size, [](u8 byte) { return byte == 0; });
+        };
         bool apply = true;
-        for (const auto& record : patch.records) {
+        for (size_t i = 0; i < patch.records.size(); ++i) {
+            const auto& record = patch.records[i];
+            placed[i] = record.module_offset;
             if (!fits(nso, record.module_offset, record.bytes.size()) ||
                 !fits(out, record.module_offset, record.bytes.size()) ||
                 !fits(nso, record.module_offset, record.original.size())) {
@@ -654,20 +670,53 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             }
             const size_t offset = sizeof(Loader::NSOHeader) + record.module_offset;
             if (record.executable_padding) {
-                const auto& text = header.segments[0];
-                const u64 text_end = u64{text.location} + text.size;
-                const u64 executable_end = (text_end + 0xFFF) & ~u64{0xFFF};
+                const u64 size = record.bytes.size();
                 if (record.module_offset < text_end ||
-                    record.module_offset + record.bytes.size() > executable_end ||
-                    record.module_offset + record.bytes.size() > header.segments[1].location ||
-                    !std::all_of(nso.begin() + offset, nso.begin() + offset + record.bytes.size(),
-                                 [](u8 byte) { return byte == 0; })) {
+                    record.module_offset + size > executable_end ||
+                    !zero(nso, record.module_offset, size)) {
                     LOG_WARNING(Loader,
                                 "    - Skipping \"{}\": code cave is not executable padding",
                                 patch.name);
                     apply = false;
                     break;
                 }
+                if (zero(out, record.module_offset, size)) {
+                    continue;
+                }
+                // The highest free run, with 16 zero bytes on each side within the padding, so
+                // it does not land in a gap inside a mod's code.
+                constexpr u64 Margin = 16;
+                const u64 page = record.module_offset & ~u64{0xFFF};
+                const u64 low = (std::max)(text_end, page);
+                const u64 high = (std::min)(executable_end, page + 0x1000);
+                std::optional<u64> found;
+                for (u64 at = (high - size) & ~u64{0xF}; high >= size && at >= low; at -= 0x10) {
+                    const u64 guard_begin = (std::max)(low, at >= Margin ? at - Margin : 0);
+                    const u64 guard_end = (std::min)(high, at + size + Margin);
+                    if (fits(out, guard_begin, guard_end - guard_begin) &&
+                        zero(nso, guard_begin, guard_end - guard_begin) &&
+                        zero(out, guard_begin, guard_end - guard_begin)) {
+                        found = at;
+                        break;
+                    }
+                    if (at < 0x10) {
+                        break;
+                    }
+                }
+                if (!found) {
+                    LOG_INFO(Loader,
+                             "    - Skipping \"{}\": a user mod took its code cave at {}+{:#x} and "
+                             "no free padding is left",
+                             patch.name, name, record.module_offset);
+                    apply = false;
+                    break;
+                }
+                placed[i] = *found;
+                LOG_INFO(Loader,
+                         "    - Moving \"{}\"'s routine from {}+{:#x} to {:#x}: a user mod uses "
+                         "that code cave",
+                         patch.name, name, record.module_offset, *found);
+                continue;
             }
             if (!std::equal(record.original.begin(), record.original.end(), nso.begin() + offset)) {
                 LOG_WARNING(Loader, "    - Skipping \"{}\": unexpected original bytes at {}+{:#x}",
@@ -686,9 +735,32 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (!apply) {
             continue;
         }
-        for (const auto& record : patch.records) {
-            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + record.module_offset,
-                        record.bytes.data(), record.bytes.size());
+        for (size_t i = 0; i < patch.records.size(); ++i) {
+            const auto& record = patch.records[i];
+            std::vector<u8> bytes(record.bytes.begin(), record.bytes.end());
+            // A b/bl into a moved routine is aimed at its new place.
+            if (!record.executable_padding && bytes.size() == sizeof(u32)) {
+                u32 insn;
+                std::memcpy(&insn, bytes.data(), sizeof(insn));
+                if ((insn & 0x7C000000) == 0x14000000) {
+                    const s64 imm = static_cast<s64>(static_cast<s32>(insn << 6) >> 6) * 4;
+                    const u64 target = record.module_offset + imm;
+                    for (size_t j = 0; j < patch.records.size(); ++j) {
+                        const auto& cave = patch.records[j];
+                        if (!cave.executable_padding || placed[j] == cave.module_offset ||
+                            target < cave.module_offset ||
+                            target >= cave.module_offset + cave.bytes.size()) {
+                            continue;
+                        }
+                        const s64 delta = static_cast<s64>(target - cave.module_offset + placed[j]) -
+                                          static_cast<s64>(record.module_offset);
+                        insn = (insn & 0xFC000000) | (static_cast<u32>(delta / 4) & 0x03FFFFFF);
+                        std::memcpy(bytes.data(), &insn, sizeof(insn));
+                    }
+                }
+            }
+            std::memcpy(out.data() + sizeof(Loader::NSOHeader) + placed[i], bytes.data(),
+                        bytes.size());
         }
         LOG_INFO(Loader, "    - Applying built-in patch \"{}\" ({} records) to {}", patch.name,
                  patch.records.size(), name);

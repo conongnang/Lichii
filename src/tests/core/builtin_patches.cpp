@@ -389,12 +389,6 @@ TEST_CASE("Built-in Dynamic FPS leaves both records alone when a user mod change
     SECTION("Identical call still takes precedence for the whole patch") {
         mod_word = DynamicCallInstruction;
     }
-    SECTION("User routine takes precedence") {
-        offset = DynamicRoutineOffset;
-    }
-    SECTION("Last routine byte takes precedence") {
-        offset = DynamicRoutineOffset + DynamicRoutineSize - sizeof(u32);
-    }
     SECTION("User timer state takes precedence") {
         offset = DynamicStateOffset;
     }
@@ -404,6 +398,44 @@ TEST_CASE("Built-in Dynamic FPS leaves both records alone when a user mod change
     auto expected = nso;
     std::memcpy(expected.data() + offset, &mod_word, sizeof(mod_word));
     REQUIRE(context.Manager().PatchNSO(nso, "main") == expected);
+}
+
+TEST_CASE("Built-in FPS Unlock moves its routine out of a code cave a user mod took",
+          "[patch_manager]") {
+    // Hyrule-Cheat-Menu's hook stubs start at main+0x3C46280, inside the unlock routine.
+    size_t mod_offset = DynamicRoutineOffset + 0x80;
+    SECTION("Inside the routine") {}
+    SECTION("At the routine's start") {
+        mod_offset = DynamicRoutineOffset;
+    }
+    const auto nso = MakeDynamicMain();
+    std::vector<u8> unmoved;
+    {
+        PatchManagerTestContext clean;
+        Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
+        unmoved = clean.Manager().PatchNSO(nso, "main");
+    }
+    const u32 mod_word = 0x14000001;
+    PatchManagerTestContext context{mod_word, mod_offset};
+    Settings::values.disabled_addons[OcarinaTitleId] = {std::string{MaxResolution}};
+    const auto manager = context.Manager();
+    const auto patched = manager.PatchNSO(nso, "main");
+
+    REQUIRE(WordAt(patched, mod_offset) == mod_word);
+    const u32 call = WordAt(patched, DynamicCallOffset);
+    REQUIRE((call & 0xFC000000) == 0x94000000);
+    REQUIRE(call != DynamicCallInstruction);
+    const s64 delta = static_cast<s64>(static_cast<s32>(call << 6) >> 6) * 4;
+    const size_t routine = static_cast<size_t>(static_cast<s64>(DynamicCallOffset) + delta);
+    // Same page, so the routine's adrp still reaches the frame hold byte; past the mod's word.
+    constexpr size_t Header = sizeof(Loader::NSOHeader);
+    REQUIRE(((routine - Header) & ~size_t{0xFFF}) ==
+            ((DynamicRoutineOffset - Header) & ~size_t{0xFFF}));
+    REQUIRE(routine - Header + UnlockRoutineSize <= 0x3C47000);
+    REQUIRE(routine >= mod_offset + 16 + sizeof(u32));
+    REQUIRE(std::equal(patched.begin() + routine, patched.begin() + routine + UnlockRoutineSize,
+                       unmoved.begin() + DynamicRoutineOffset));
+    REQUIRE(manager.AppliedFrameHold().has_value());
 }
 
 TEST_CASE("Built-in Texture Pool x2 doubles the allocator's initial pool size",
