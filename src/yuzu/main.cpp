@@ -5,6 +5,7 @@
 
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
+#include "common/pgo_training.h"
 #include "nx2_switches.h"
 #include "startup_checks.h"
 
@@ -205,6 +206,7 @@ int main(int argc, char* argv[]) {
     // generating shaders
     setlocale(LC_ALL, "C");
 
+    Common::StartProfileDumps();
     MainWindow main_window{has_broken_vulkan};
     // After settings have been loaded by GMainWindow, apply the filter
     main_window.show();

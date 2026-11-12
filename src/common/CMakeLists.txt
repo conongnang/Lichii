@@ -144,6 +144,7 @@ add_library(
     typed_address.h
     uint128.h
     unique_function.h
+    pgo_training.h
     random.cpp
     random.h
     uuid.cpp
@@ -164,9 +165,12 @@ add_library(
 # The ZBIC decoder runs once per module at load, so a profile buys it nothing, and the aarch64
 # PGO build returns errors for NSOs the plain build decodes (#95). -fno-profile-instr-use is the
 # spelling both clang and clang-cl accept; it overrides -fprofile-use from CMAKE_CXX_FLAGS.
+# An instrumented (-fprofile-generate) MinGW clang build fails the same way ("Data corruption
+# detected" on Ocarina's main), so GNU-style clang leaves the file out of training as well.
+set(ZBIC_NO_PROFILE_GENERATE "$<AND:$<CXX_COMPILER_ID:AppleClang,Clang>,$<STREQUAL:${CMAKE_CXX_COMPILER_FRONTEND_VARIANT},GNU>>")
 set_source_files_properties(zbic_compression.cpp PROPERTIES
     INCLUDE_DIRECTORIES "${ZBIC_INCLUDE_DIR}"
-    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wno-unused-function;-Wno-missing-declarations;-Wno-shadow>;$<$<CXX_COMPILER_ID:MSVC>:/wd4505;/wd5245>;$<$<CXX_COMPILER_ID:AppleClang,Clang>:-fno-profile-instr-use>")
+    COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wno-unused-function;-Wno-missing-declarations;-Wno-shadow>;$<$<CXX_COMPILER_ID:MSVC>:/wd4505;/wd5245>;$<$<CXX_COMPILER_ID:AppleClang,Clang>:-fno-profile-instr-use>;$<${ZBIC_NO_PROFILE_GENERATE}:-fno-profile-generate>")
 
 if(WIN32)
     target_sources(common PRIVATE windows/timer_resolution.cpp
