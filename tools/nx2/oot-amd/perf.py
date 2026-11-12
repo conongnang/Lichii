@@ -24,8 +24,19 @@ SWITCHES = os.path.join(os.environ["APPDATA"], "eden", "nx2_switches.txt")
 # The Castle Town test save (10:00 daytime, the market's time stands still, so every run sees the
 # daytime crowd). Before each launch the live save is compared with it and swapped for it when it
 # differs; the live one is kept in oot-test-backup/save-live-<time>/ first.
-SAVE_DIR = os.path.join(os.environ["APPDATA"], "eden", "nand", "user", "save", "0000000000000000",
-                        "<emulated user id>", "0400486024DEC000")
+def find_save_dir():
+    """The OoT save of the emulated user that has one (OOT_SAVE_DIR overrides)."""
+    if os.environ.get("OOT_SAVE_DIR"):
+        return os.environ["OOT_SAVE_DIR"]
+    root = os.path.join(os.environ["APPDATA"], "eden", "nand", "user", "save", "0000000000000000")
+    users = sorted(os.listdir(root)) if os.path.isdir(root) else []
+    for user in users:
+        if os.path.isdir(os.path.join(root, user, "0400486024DEC000")):
+            return os.path.join(root, user, "0400486024DEC000")
+    return os.path.join(root, users[0] if users else "", "0400486024DEC000")
+
+
+SAVE_DIR = find_save_dir()
 BACKUP = os.path.join(os.environ["APPDATA"], "eden", "oot-test-backup")
 TEST_SAVE = os.environ.get("OOT_TEST_SAVE", os.path.join(BACKUP, "save-castle-town-20261109",
                                                           "0400486024DEC000"))
