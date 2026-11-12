@@ -74,14 +74,21 @@ using VideoCore::Surface::IsPixelFormatSRGB;
 using VideoCore::Surface::SurfaceType;
 
 namespace {
-/// EDEN_NX2_IMAGE_POOL=1: deleted render targets' VkImages are kept for the next image made with
-/// the same create info (from Frizti's Fritchii, EXP42).
-bool ImagePoolEnabled() {
-    static const bool enabled = [] {
+/// Deleted render targets' VkImages are kept for the next image made with the same create info
+/// (from Frizti's Fritchii, EXP42), dedicated allocations included: Ocarina of Time rebinds its
+/// post-processing targets at the same memory in a fixed set of shapes, and a camera pan in Castle
+/// Town made ~4,000 images a 600 frames; the pool served 82% of them (pan 68.9 -> 72.2 fps, worst
+/// frame 26-30 -> 20-24 ms, 3 runs each). EDEN_NX2_IMAGE_POOL=0 off, =1 suballocated images only.
+int ImagePoolMode() {
+    static const int mode = [] {
         const char* value = std::getenv("EDEN_NX2_IMAGE_POOL");
-        return value != nullptr && value[0] == '1';
+        return value != nullptr ? std::atoi(value) : 2;
     }();
-    return enabled;
+    return mode;
+}
+
+bool ImagePoolEnabled() {
+    return ImagePoolMode() >= 1;
 }
 } // Anonymous namespace
 
@@ -3063,6 +3070,10 @@ void TextureCacheRuntime::ReleaseMsaaScratchImage(VkImage image) {
     }
 }
 
+u64 TextureCacheRuntime::ImagePoolCap() {
+    return ImagePoolMode() >= 2 ? ImagePoolMaxBytesDedicated : ImagePoolMaxBytes;
+}
+
 vk::Image TextureCacheRuntime::TakePooledImage(const ImagePoolKey& key) {
     if (!key.valid || !ImagePoolEnabled()) {
         return vk::Image{};
@@ -3083,7 +3094,7 @@ vk::Image TextureCacheRuntime::TakePooledImage(const ImagePoolKey& key) {
 }
 
 void TextureCacheRuntime::PoolImage(const ImagePoolKey& key, vk::Image image, u64 bytes) {
-    if (!key.valid || !image || bytes > ImagePoolMaxBytes) {
+    if (!key.valid || !image || bytes > ImagePoolCap()) {
         return;
     }
     image_pool.push_back(PooledImage{
@@ -3094,7 +3105,7 @@ void TextureCacheRuntime::PoolImage(const ImagePoolKey& key, vk::Image image, u6
     });
     image_pool_bytes += bytes;
     ++image_pool_given;
-    TrimImagePool(ImagePoolMaxBytes);
+    TrimImagePool(ImagePoolCap());
 }
 
 void TextureCacheRuntime::TrimImagePool(u64 max_bytes) {
@@ -3294,7 +3305,11 @@ void Image::ReleaseToPool() {
         // Dedicated allocations (block 0) and memory placed in host memory over budget are
         // freed as before.
         const vk::Image::MemoryBlock block = image.GetMemoryBlock();
-        if (block.block == 0 || block.size < MinPooledBytes || !image.IsDeviceLocal()) {
+        // Mode 2 pools dedicated allocations (block 0) too: Ocarina's big render targets are
+        // dedicated (a 1280x720 one was remade up to 282 times a 600 frames, Fritchii 3c09b12762).
+        const bool dedicated = block.block == 0;
+        if ((dedicated && ImagePoolMode() < 2) || block.size < MinPooledBytes ||
+            !image.IsDeviceLocal()) {
             return;
         }
         if (ENABLE_MSAA_RESOLVE_CONSUME) {
