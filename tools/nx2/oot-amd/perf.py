@@ -362,6 +362,21 @@ def run(a):
         env["EDEN_NX2_GPU_PROFILE"] = "1"
     d = os.path.join(OUT, a.name)
     os.makedirs(d, exist_ok=True)
+    # The user's switches file (%APPDATA%\eden\nx2_switches.txt) beats the exe folder's: swap in
+    # the test's for the run and put the user's back after, so a test never leaves its own.
+    saved_switches = None
+    if not a.attach and os.path.exists(SWITCHES):
+        with open(SWITCHES, encoding="utf-8") as f:
+            saved_switches = f.read()
+    try:
+        run_measured(a, env, d)
+    finally:
+        if saved_switches is not None:  # read only at startup: safe to restore while it runs
+            with open(SWITCHES, "w", encoding="utf-8") as f:
+                f.write(saved_switches)
+
+
+def run_measured(a, env, d):
     cache = None
     if not a.attach and a.test_save:
         if running() and a.kill:
