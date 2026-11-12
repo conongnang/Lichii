@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <cstdlib>
 #include "dynarmic/frontend/A64/translate/impl/impl.h"
 
 namespace Dynarmic::A64 {
@@ -90,8 +91,13 @@ bool TranslatorVisitor::DMB(Imm<4> CRm) {
 #ifdef ARCHITECTURE_x86_64
     // DMB *LD (loads before later accesses) and DMB *ST (stores before later stores) order what
     // x86 already orders: only a full barrier needs mfence (from Lichii #161).
+    // EDEN_NX2_PLAIN_ACQUIRE=0 (experiment switch for #1327) keeps every DMB.
+    static const bool skip = [] {
+        const char* value = std::getenv("EDEN_NX2_PLAIN_ACQUIRE");
+        return value == nullptr || value[0] != '0';
+    }();
     const u32 access = CRm.ZeroExtend() & 3U;
-    if (access == 1U || access == 2U) {
+    if (skip && (access == 1U || access == 2U)) {
         return true;
     }
 #else

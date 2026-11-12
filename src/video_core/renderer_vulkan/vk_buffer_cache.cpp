@@ -557,7 +557,12 @@ void BufferCacheRuntime::CopyBuffer(VkBuffer dst_buffer, VkBuffer src_buffer,
     }
 
     scheduler.RequestOutsideRenderPassOperationContext();
-    if (barrier && src_buffer == staging_pool.StreamBuf() && !vk_copies.empty()) {
+    // Experiment switch for #1245: EDEN_NX2_UPLOAD_BATCH=0 records every upload on its own.
+    static const bool batch_uploads = [] {
+        const char* value = std::getenv("EDEN_NX2_UPLOAD_BATCH");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (batch_uploads && barrier && src_buffer == staging_pool.StreamBuf() && !vk_copies.empty()) {
         // Only in-order stream uploads share barriers. Dedicated staging buffers retain their
         // normal recording path and tick-based reuse.
         scheduler.RecordUpload(src_buffer, dst_buffer,

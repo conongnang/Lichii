@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
 #include <algorithm>
 #include <cstddef>
 #include <limits>
@@ -39,6 +40,15 @@ using Tegra::Engines::Maxwell3D;
 using VideoCommon::QueryType;
 
 namespace {
+
+// Experiment switch for #1087: EDEN_NX2_QUERY_AVAILABILITY=0 keeps the old query copies on AMD.
+bool UseQueryAvailability(const Device& device) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_QUERY_AVAILABILITY");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled && device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY;
+}
 class SamplesQueryBank : public VideoCommon::BankBase {
 public:
     static constexpr size_t BANK_SIZE = 256;
@@ -90,7 +100,7 @@ public:
         const auto& dev = device.GetLogical();
         // AMD's driver: read what is available without blocking; a result that has not landed
         // counts as visible (1024 samples), as in the GPU-side resolve (SyncWrites).
-        if (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY) {
+        if (UseQueryAvailability(device)) {
             ASSERT(start + size <= BANK_SIZE);
             std::array<std::pair<u64, u64>, BANK_SIZE> values{};
             const VkResult query_result =
@@ -173,7 +183,7 @@ public:
         accumulation_value = 0;
         queries_prefix_scan_pass.emplace(device, scheduler, descriptor_pool,
                                          compute_pass_descriptor_queue);
-        if (device.GetDriverID() == VK_DRIVER_ID_AMD_PROPRIETARY) {
+        if (UseQueryAvailability(device)) {
             availability_pass.emplace(device, scheduler, descriptor_pool,
                                       compute_pass_descriptor_queue);
         }

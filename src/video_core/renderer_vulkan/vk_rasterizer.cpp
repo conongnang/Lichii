@@ -2799,7 +2799,12 @@ void RasterizerVulkan::FlushCommands() {
     // A fence with a download is submitted by InnerFence::Queue, and SignalFence then comes here
     // with nothing recorded since: ~4,600 empty submits a second in Ocarina of Time's Castle
     // Town, each followed by a full rebind (from Fritchii c338269b92).
-    if (!scheduler.RecordedSinceSubmit()) {
+    // Experiment switch for #1329: EDEN_NX2_SKIP_EMPTY_FLUSH=0 submits them anyway.
+    static const bool skip_empty = [] {
+        const char* value = std::getenv("EDEN_NX2_SKIP_EMPTY_FLUSH");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (skip_empty && !scheduler.RecordedSinceSubmit()) {
         Scheduler::CountSkippedFlush();
         return;
     }

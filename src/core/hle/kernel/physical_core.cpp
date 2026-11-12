@@ -258,7 +258,18 @@ void PhysicalCore::Idle(KernelCore& kernel) {
     const auto start = std::chrono::steady_clock::now();
     bool polled = false;
     std::chrono::steady_clock::rep interrupt_time{};
-    if (limit.count() > 0) {
+    // Experiment switch for #1373: EDEN_NX2_IDLE_WAIT=0 brings back the fixed poll of yields.
+    static const bool hardware_wait = [] {
+        const char* value = std::getenv("EDEN_NX2_IDLE_WAIT");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (limit.count() > 0 && !hardware_wait) {
+        m_idle_poll = limit;
+        while (!(polled = m_is_interrupted.load(std::memory_order_acquire)) &&
+               std::chrono::steady_clock::now() - start < limit) {
+            std::this_thread::yield();
+        }
+    } else if (limit.count() > 0) {
         if (m_idle_poll.count() <= 0 || m_idle_poll > limit) {
             m_idle_poll = limit;
         }
@@ -272,7 +283,7 @@ void PhysicalCore::Idle(KernelCore& kernel) {
     }
     const auto end = std::chrono::steady_clock::now();
     const auto poll = m_idle_poll;
-    if (limit.count() > 0) {
+    if (limit.count() > 0 && hardware_wait) {
         m_idle_poll = Common::NextPollWindow(m_idle_poll, end - start, limit);
     }
 

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <bit>
 #include <utility>
 #include "dynarmic/backend/x64/xbyak.h"
@@ -250,6 +251,33 @@ const void* EmitReadMemoryMov(BlockOfCode& code, int value_idx, const Xbyak::Reg
     // are xchg, which drains the store buffer: an ordered or exclusive load of up to 64 bits is a
     // plain mov (from Lichii #161). A locked xadd took the cache line exclusively on every core
     // that read it, and faulted on pages that are not writable.
+    // Experiment switch for #1327: EDEN_NX2_PLAIN_ACQUIRE=0 brings back the locked xadd loads.
+    static const bool plain_acquire = [] {
+        const char* value = std::getenv("EDEN_NX2_PLAIN_ACQUIRE");
+        return value == nullptr || value[0] != '0';
+    }();
+    if constexpr (bitsize != 128) {
+        if (ordered && !plain_acquire) {
+            code.xor_(Xbyak::Reg32(value_idx), Xbyak::Reg32(value_idx));
+            const void* fastmem_location = code.getCurr();
+            code.lock();
+            switch (bitsize) {
+            case 8:
+                code.xadd(code.byte[addr], Xbyak::Reg32(value_idx).cvt8());
+                break;
+            case 16:
+                code.xadd(word[addr], Xbyak::Reg64(value_idx).cvt16());
+                break;
+            case 32:
+                code.xadd(dword[addr], Xbyak::Reg64(value_idx).cvt32());
+                break;
+            case 64:
+                code.xadd(qword[addr], Xbyak::Reg64(value_idx));
+                break;
+            }
+            return fastmem_location;
+        }
+    }
     if (ordered && bitsize == 128) {
         code.xor_(eax, eax);
         code.xor_(ebx, ebx);
