@@ -2461,6 +2461,14 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const size_t stage_index{index - 1};
         infos[stage_index] = &program.info;
 
+        if (program.is_geometry_passthrough && previous_stage != nullptr &&
+            !host_info.support_geometry_shader_passthrough) {
+            // Emulated passthrough: only the previous stage's outputs can pass through. Copying all
+            // 32 generics exceeds AMD's 128 output components, and amdvlk fail-fasts instead of
+            // returning an error. The previous stage's legacy outputs are generics by now, so the
+            // ones they were mapped to are kept.
+            Shader::Maxwell::TrimGeometryPassthrough(program, previous_stage->info.stores);
+        }
         auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};
         if (mesh_emulation && (program.stage == Shader::Stage::Mesh ||
                                program.stage == Shader::Stage::Task)) {
