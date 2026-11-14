@@ -25,27 +25,15 @@ public:
     ~GPUDirtyMemoryManager() = default;
 
     void Collect(PAddr address, size_t size) {
-        TransformAddress t = BuildTransform(address, size);
-        TransformAddress tmp, original;
-        do {
-            tmp = current.load(std::memory_order_acquire);
-            original = tmp;
-            if (tmp.address != t.address) {
-                if (IsValid(tmp.address)) {
-                    std::scoped_lock lk(guard);
-                    back_buffer.emplace_back(tmp);
-                    current.exchange(t, std::memory_order_relaxed);
-                    return;
-                }
-                tmp.address = t.address;
-                tmp.mask = 0;
-            }
-            if ((tmp.mask | t.mask) == tmp.mask) {
-                return;
-            }
-            tmp.mask |= t.mask;
-        } while (!current.compare_exchange_weak(original, tmp, std::memory_order_release,
-                                                std::memory_order_relaxed));
+        // A transform covers one page: a write past its page goes in a page at a time. Its mask
+        // was otherwise built with shifts of 32 or more, which could leave it empty and lose the
+        // write (with an older one left in back_buffer and `current` showing nothing).
+        while (size != 0) {
+            const size_t in_page = (std::min<size_t>)(size, page_size - (address & page_mask));
+            CollectInPage(address, in_page);
+            address += in_page;
+            size -= in_page;
+        }
     }
 
     /// Calls `callback` for each write collected and not yet applied, without consuming them: those
@@ -117,6 +105,31 @@ private:
         u32 address;
         u32 mask;
     };
+
+    /// [address, address + size) lies in one page and size is not 0, so the mask has bits.
+    void CollectInPage(PAddr address, size_t size) {
+        TransformAddress t = BuildTransform(address, size);
+        TransformAddress tmp, original;
+        do {
+            tmp = current.load(std::memory_order_acquire);
+            original = tmp;
+            if (tmp.address != t.address) {
+                if (IsValid(tmp.address)) {
+                    std::scoped_lock lk(guard);
+                    back_buffer.emplace_back(tmp);
+                    current.exchange(t, std::memory_order_relaxed);
+                    return;
+                }
+                tmp.address = t.address;
+                tmp.mask = 0;
+            }
+            if ((tmp.mask | t.mask) == tmp.mask) {
+                return;
+            }
+            tmp.mask |= t.mask;
+        } while (!current.compare_exchange_weak(original, tmp, std::memory_order_release,
+                                                std::memory_order_relaxed));
+    }
 
     template <typename Func>
     static void ForEachRun(const TransformAddress& transform, Func&& callback) {
