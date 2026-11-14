@@ -121,6 +121,11 @@ void PerfMapRegister(const void* start, const void* end, std::string_view friend
 }
 }  // namespace detail
 
+bool PerfMapEnabled() noexcept {
+    static const bool enabled = std::getenv("EDEN_NX2_JIT_MAP") != nullptr;
+    return enabled;
+}
+
 void PerfMapClear() {
     std::lock_guard guard{mutex};
     if (file) {
