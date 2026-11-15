@@ -300,6 +300,65 @@ constexpr std::array DYNAMIC_FPS_RECORDS{
     BuiltinPatchRecord{0x4760C, WATER_MUL_NOP, WATER_MUL_ORIGINAL},
     BuiltinPatchRecord{0x3C46300, WATER_STEPS_ROUTINE, {}, true},
 };
+// A movie player counts its updates with a picture shown (+0x2F8, one more each), and a cutscene
+// that plays a movie takes that count as its timeline frame: its voices, overlays and its end are
+// placed by it. The picture and the sound follow the clock, so at any other frame rate than 60 the
+// cues drift from them (sages' lines over each other at 30 or 120 fps, #1474, #1572). The count
+// takes whole ticks of the step through the shared helper instead, keyed by the counter's address.
+// Same site as Hookshot's movie frame count (issue 1742).
+constexpr std::array<u8, 4> MOVIE_FRAMES_ORIGINAL{0x08, 0x05, 0x00, 0x11}; // add w8, w8, #1
+constexpr std::array<u8, 4> MOVIE_FRAMES_HOOK{0xAA, 0xA8, 0x03, 0x14};     // b main+0x3C46A70
+// add x13, x20, #0x2f8 ; load raw step ; bl helper ; add w8, w8, w13 ; b 0x3B5C7CC
+constexpr std::array<u8, 56> MOVIE_FRAMES_ROUTINE{
+    0xED, 0x3B, 0xBD, 0xA9, 0xEF, 0x43, 0x01, 0xA9, 0xFE, 0x13, 0x00, 0xF9, 0x8D, 0xE2,
+    0x0B, 0x91, 0xCE, 0x81, 0x00, 0x90, 0xCE, 0x49, 0x44, 0xF9, 0xCE, 0x01, 0x40, 0xF9,
+    0xC0, 0x11, 0x40, 0xBD, 0xBC, 0xFF, 0xFF, 0x97, 0x08, 0x01, 0x0D, 0x0B, 0xFE, 0x13,
+    0x40, 0xF9, 0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0x4A, 0x57, 0xFC, 0x17,
+};
+// Scarecrow's Song recording keeps each note's and gap's length in the elapsed counter that
+// playback (0x3293410 above) advances, and adds trunc(step) to it in two more places: while a note
+// or gap is held (0x3296B08) and when the last note is timed (0x32926C8). With FPS Unlock the step
+// sits around 1.0 at 60 fps and below it above 60, so the cut is often 0: lengths come out short or
+// zero, and the song stops after its first note (#1730). Both take whole ticks for that counter
+// from the shared helper instead. Hookshot found the two sites (f_832b6840 and f_832b2690).
+constexpr std::array<u8, 4> SCARECROW_CUT_ORIGINAL{0x08, 0x00, 0x39, 0x1E}; // fcvtzu w8, s0
+constexpr std::array<u8, 4> SCARECROW_RECORD_HOOK{0xEA, 0xBF, 0x26, 0x14};  // b main+0x3C46AB0
+constexpr std::array<u8, 4> SCARECROW_LAST_HOOK{0x04, 0xD1, 0x26, 0x14};    // b main+0x3C46AD8
+// mov x13, x9 ; bl helper ; mov w8, w13 ; b 0x3296B0C
+constexpr std::array<u8, 40> SCARECROW_RECORD_ROUTINE{
+    0xED, 0x3B, 0xBD, 0xA9, 0xEF, 0x43, 0x01, 0xA9, 0xFE, 0x13, 0x00, 0xF9, 0xED, 0x03,
+    0x09, 0xAA, 0xB0, 0xFF, 0xFF, 0x97, 0xE8, 0x03, 0x0D, 0x2A, 0xFE, 0x13, 0x40, 0xF9,
+    0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0x0E, 0x40, 0xD9, 0x17,
+};
+// add x13, x20, #0x5fc ; bl helper ; mov w8, w13 ; b 0x32926CC
+constexpr std::array<u8, 40> SCARECROW_LAST_ROUTINE{
+    0xED, 0x3B, 0xBD, 0xA9, 0xEF, 0x43, 0x01, 0xA9, 0xFE, 0x13, 0x00, 0xF9, 0x8D, 0xF2,
+    0x17, 0x91, 0xA6, 0xFF, 0xFF, 0x97, 0xE8, 0x03, 0x0D, 0x2A, 0xFE, 0x13, 0x40, 0xF9,
+    0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0xF4, 0x2E, 0xD9, 0x17,
+};
+// The cloth update (Havok cloth: clothes, hair, and the wind action's phase) gets its time step as
+// scale * 1/60, without the frame step, at four sites. Above 60 fps every frame still simulates
+// 1/60 s, so cloth and wind run fast (twice as fast at 120 fps). Each 1/60 load becomes a call
+// that returns min(step / 60, 1/60) (1/60 when the step is not positive), so 60 fps and below
+// keep the original value exactly.
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_A{0x00, 0x6D, 0x46, 0xBD}; // ldr s0, [x8, #0x66c]
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_B{0x00, 0x01, 0x27, 0x1E}; // fmov s0, w8
+constexpr std::array<u8, 4> CLOTH_DT_ORIGINAL_D{0x02, 0x6D, 0x46, 0xBD}; // ldr s2, [x8, #0x66c]
+constexpr std::array<u8, 4> CLOTH_DT_CALL_A{0xF5, 0x01, 0xEC, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_B{0xBF, 0x6C, 0xE6, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_C{0xD7, 0x98, 0x40, 0x94};     // bl main+0x3C46B00
+constexpr std::array<u8, 4> CLOTH_DT_CALL_D{0xA9, 0x92, 0x40, 0x94};     // bl main+0x3C46B30
+// x16 = step / 60 bits ; w17 = (bits - 1 < bits(1/60) - 1 ? bits : bits(1/60)) ; fmov s0|s2, w17
+constexpr std::array<u8, 48> CLOTH_DT_ROUTINE_S0{
+    0xD0, 0x81, 0x00, 0x90, 0x10, 0x4A, 0x44, 0xF9, 0x10, 0x02, 0x40, 0xF9, 0x11, 0x1A, 0x40, 0xB9,
+    0x10, 0x11, 0x91, 0x52, 0x10, 0x91, 0xA7, 0x72, 0x31, 0x06, 0x00, 0x51, 0x3F, 0x02, 0x10, 0x6B,
+    0x31, 0x32, 0x90, 0x1A, 0x31, 0x06, 0x00, 0x11, 0x20, 0x02, 0x27, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+};
+constexpr std::array<u8, 48> CLOTH_DT_ROUTINE_S2{
+    0xD0, 0x81, 0x00, 0x90, 0x10, 0x4A, 0x44, 0xF9, 0x10, 0x02, 0x40, 0xF9, 0x11, 0x1A, 0x40, 0xB9,
+    0x10, 0x11, 0x91, 0x52, 0x10, 0x91, 0xA7, 0x72, 0x31, 0x06, 0x00, 0x51, 0x3F, 0x02, 0x10, 0x6B,
+    0x31, 0x32, 0x90, 0x1A, 0x31, 0x06, 0x00, 0x11, 0x22, 0x02, 0x27, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+};
 constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
@@ -324,6 +383,18 @@ constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x389AC2C, GROUND_VELOCITY_NOP, GROUND_VELOCITY_ORIGINAL_C},
     BuiltinPatchRecord{0x261EB18, TURN_SPEED_HOOK, TURN_SPEED_ORIGINAL},
     BuiltinPatchRecord{0x3C46A40, TURN_SPEED_ROUTINE, {}, true, true},
+    BuiltinPatchRecord{0x3B5C7C8, MOVIE_FRAMES_HOOK, MOVIE_FRAMES_ORIGINAL},
+    BuiltinPatchRecord{0x3C46A70, MOVIE_FRAMES_ROUTINE, {}, true, true},
+    BuiltinPatchRecord{0x3296B08, SCARECROW_RECORD_HOOK, SCARECROW_CUT_ORIGINAL},
+    BuiltinPatchRecord{0x3C46AB0, SCARECROW_RECORD_ROUTINE, {}, true, true},
+    BuiltinPatchRecord{0x32926C8, SCARECROW_LAST_HOOK, SCARECROW_CUT_ORIGINAL},
+    BuiltinPatchRecord{0x3C46AD8, SCARECROW_LAST_ROUTINE, {}, true, true},
+    BuiltinPatchRecord{0x14632C, CLOTH_DT_CALL_A, CLOTH_DT_ORIGINAL_A},
+    BuiltinPatchRecord{0x2AB804, CLOTH_DT_CALL_B, CLOTH_DT_ORIGINAL_B},
+    BuiltinPatchRecord{0x2C207A4, CLOTH_DT_CALL_C, CLOTH_DT_ORIGINAL_A},
+    BuiltinPatchRecord{0x2C2208C, CLOTH_DT_CALL_D, CLOTH_DT_ORIGINAL_D},
+    BuiltinPatchRecord{0x3C46B00, CLOTH_DT_ROUTINE_S0, {}, true},
+    BuiltinPatchRecord{0x3C46B30, CLOTH_DT_ROUTINE_S2, {}, true},
 };
 
 constexpr std::array BUILTIN_PATCHES{
