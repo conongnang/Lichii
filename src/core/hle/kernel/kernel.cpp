@@ -188,13 +188,20 @@ struct KernelCore::Impl {
         CleanupObject(hidbus_shared_mem);
         CleanupObject(system_resource_limit);
 
-        for (u32 core_id = 0; core_id < Core::Hardware::NUM_CPU_CORES; core_id++) {
-            if (shutdown_threads[core_id]) {
-                shutdown_threads[core_id]->Close(kernel);
-                shutdown_threads[core_id] = nullptr;
+        // The scheduler only points at its main and idle threads. Left open, they were freed with
+        // the slab heaps without being finalized, and each one's fiber (a 2 MiB stack) leaked: 8
+        // per kernel started. Every core's threads are closed before any scheduler goes: closing
+        // one takes the scheduler lock, whose release can update the schedulers of all cores.
+        for (auto* threads : {&shutdown_threads, &main_threads, &idle_threads}) {
+            for (auto*& thread : *threads) {
+                if (thread) {
+                    thread->Close(kernel);
+                    thread = nullptr;
+                }
             }
-
-            schedulers[core_id].reset();
+        }
+        for (auto& scheduler : schedulers) {
+            scheduler.reset();
         }
 
         // Next host thead ID to use, IDs below NUM_CPU_CORES represent core threads, the rest others
@@ -267,11 +274,13 @@ struct KernelCore::Impl {
             main_thread->SetCurrentCore(core);
             ASSERT(Kernel::KThread::InitializeMainThread(system, main_thread, core).IsSuccess());
             KThread::Register(system.Kernel(), main_thread);
+            main_threads[i] = main_thread;
 
             auto* idle_thread{Kernel::KThread::Create(system.Kernel())};
             idle_thread->SetCurrentCore(core);
             ASSERT(Kernel::KThread::InitializeIdleThread(system, idle_thread, core).IsSuccess());
             KThread::Register(system.Kernel(), idle_thread);
+            idle_threads[i] = idle_thread;
 
             schedulers[i]->Initialize(system.Kernel(), main_thread, idle_thread, core);
         }
@@ -884,6 +893,8 @@ struct KernelCore::Impl {
     std::optional<KMemoryLayout> memory_layout;
 
     std::array<KThread*, Core::Hardware::NUM_CPU_CORES> shutdown_threads{};
+    std::array<KThread*, Core::Hardware::NUM_CPU_CORES> main_threads{};
+    std::array<KThread*, Core::Hardware::NUM_CPU_CORES> idle_threads{};
     std::array<std::optional<Kernel::KScheduler>, Core::Hardware::NUM_CPU_CORES> schedulers{};
 
     bool is_multicore{};
