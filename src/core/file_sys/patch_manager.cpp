@@ -69,6 +69,7 @@ struct BuiltinPatch {
     std::span<const BuiltinPatchState> states{};
     // Another built-in this one contains; it is skipped once this one is applied.
     std::string_view replaces{};
+    std::string_view requires_patch{};
     // Applies only with NVIDIA DLSS on at this quality in docked mode, and is not listed in
     // Add-Ons.
     std::optional<Settings::NvidiaDlssQuality> dlss_quality{};
@@ -83,6 +84,7 @@ struct BuiltinPatch {
 };
 
 constexpr std::string_view MAX_RESOLUTION_NAME = "Max Resolution (built-in)";
+constexpr std::string_view FPS_UNLOCK_NAME = "FPS Unlock (built-in)";
 
 constexpr std::array<u8, 4> MAX_RESOLUTION_ORIGINAL{0xE8, 0x41, 0x00, 0x36};
 constexpr std::array<u8, 4> MAX_RESOLUTION_BRANCH{0x0F, 0x02, 0x00, 0x14};
@@ -375,6 +377,30 @@ constexpr std::array<u8, 48> CLOTH_DT_ROUTINE_S2{
     0x10, 0x11, 0x91, 0x52, 0x10, 0xB1, 0xA7, 0x72, 0x31, 0x06, 0x00, 0x51, 0x3F, 0x02, 0x10, 0x6B,
     0x31, 0x32, 0x90, 0x1A, 0x31, 0x06, 0x00, 0x11, 0x22, 0x02, 0x27, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
 };
+
+// Below a step of 1, Epona's jump keeps extending the JumpReady blend for slow motion.
+// Take the normal path when both steps are positive and below 1, and differ by at most
+// 8192 ULPs. Otherwise keep the game's b.pl decision. T = *[main+0x4E94B20]; T+0x10 is
+// the global frame step. The original exits do not use x9, x10 or the condition flags.
+constexpr size_t EPONA_JUMP_HOOK_OFFSET = 0x2C3AE20;
+constexpr size_t EPONA_JUMP_CAVE_OFFSET = 0x3C46FB4;
+constexpr std::array<u8, 4> EPONA_JUMP_ORIGINAL{0x45, 0x01, 0x00, 0x54};
+constexpr std::array<u8, 4> EPONA_JUMP_BRANCH{0x65, 0x30, 0x40, 0x14};
+constexpr std::array<u8, 72> EPONA_JUMP_ROUTINE{
+    0x25, 0x02, 0x00, 0x54, 0x69, 0x92, 0x00, 0xD0, 0x29, 0x91, 0x45, 0xF9,
+    0xA9, 0x01, 0x00, 0xB4, 0x2A, 0x11, 0x40, 0xB9, 0x6A, 0x01, 0x00, 0x34,
+    0x09, 0xF0, 0xA7, 0x52, 0x5F, 0x01, 0x09, 0x6B, 0x02, 0x01, 0x00, 0x54,
+    0x49, 0x01, 0x26, 0x1E, 0x3F, 0x01, 0x00, 0x71, 0xAD, 0x00, 0x00, 0x54,
+    0x29, 0x01, 0x0A, 0x6B, 0x29, 0x55, 0x89, 0x5A, 0x3F, 0x09, 0x40, 0x71,
+    0x49, 0x00, 0x00, 0x54, 0x8C, 0xCF, 0xBF, 0x17, 0x94, 0xCF, 0xBF, 0x17,
+};
+static_assert(EPONA_JUMP_CAVE_OFFSET >= 0x3C46FB0 &&
+              EPONA_JUMP_CAVE_OFFSET + EPONA_JUMP_ROUTINE.size() <= 0x3C47000);
+constexpr std::array EPONA_JUMP_RECORDS{
+    BuiltinPatchRecord{EPONA_JUMP_HOOK_OFFSET, EPONA_JUMP_BRANCH, EPONA_JUMP_ORIGINAL},
+    BuiltinPatchRecord{EPONA_JUMP_CAVE_OFFSET, EPONA_JUMP_ROUTINE, {}, true},
+};
+
 constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x6E6CC4, DYNAMIC_FPS_CALL, DYNAMIC_FPS_ORIGINAL},
     BuiltinPatchRecord{0x3C46200, FPS_UNLOCK_ROUTINE, {}, true},
@@ -480,13 +506,21 @@ constexpr std::array BUILTIN_PATCHES{
     // Dark's routine with a tail that also lowers the step above 60 fps, so the game keeps real
     // speed at any frame rate limit (Settings frame_rate_limit).
     BuiltinPatch{
-        .name = "FPS Unlock (built-in)",
+        .name = FPS_UNLOCK_NAME,
         .title_id = 0x0400486024DEC000,
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = FPS_UNLOCK_RECORDS,
         .states = FPS_UNLOCK_STATES,
         .replaces = "Dynamic FPS by Dark (built-in)",
+    },
+    BuiltinPatch{
+        .name = "Epona jump (FPS Unlock)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = EPONA_JUMP_RECORDS,
+        .requires_patch = FPS_UNLOCK_NAME,
     },
     BuiltinPatch{
         .name = "Dynamic FPS by Dark (built-in)",
@@ -1090,8 +1124,19 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     std::vector<std::string_view> replaced;
     std::vector<std::string_view> applied_groups;
     std::vector<std::string_view> applied;
+    std::optional<std::vector<Core::Memory::CheatEntry>> cheats;
+    const auto load_cheats = [&]() -> const auto& {
+        if (!cheats) {
+            cheats = CreateCheatList(header.build_id);
+        }
+        return *cheats;
+    };
     for (const auto& patch : BUILTIN_PATCHES) {
         if (patch.title_id != title_id || patch.module != name) {
+            continue;
+        }
+        if (!patch.requires_patch.empty() &&
+            std::ranges::find(applied, patch.requires_patch) == applied.end()) {
             continue;
         }
         if (patch.off_by_default) {
@@ -1207,6 +1252,15 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
         if (!apply) {
             continue;
         }
+        if (!patch.requires_patch.empty()) {
+            const auto overlaps =
+                FindBuiltinCheatOverlaps(title_id, std::span{&patch.name, 1}, load_cheats());
+            if (!overlaps.empty()) {
+                LOG_INFO(Loader, "    - Skipping \"{}\": cheat \"{}\" uses the hook or code cave",
+                         patch.name, overlaps.front().cheat);
+                continue;
+            }
+        }
         for (const auto& record : patch.records) {
             std::memcpy(out.data() + sizeof(Loader::NSOHeader) + record.module_offset,
                         record.bytes.data(), record.bytes.size());
@@ -1229,8 +1283,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     }
 
     if (!applied.empty()) {
-        for (const auto& overlap :
-             FindBuiltinCheatOverlaps(title_id, applied, CreateCheatList(header.build_id))) {
+        for (const auto& overlap : FindBuiltinCheatOverlaps(title_id, applied, load_cheats())) {
             LOG_WARNING(Loader,
                         "Cheat \"{}\" writes {}+{:#x}..{:#x}, which built-in patch \"{}\" uses "
                         "for its {} at {}+{:#x}..{:#x}. The cheat still runs and overwrites it; "
@@ -1805,7 +1858,7 @@ std::vector<Patch> PatchManager::GetPatches(VirtualFile update_raw) const {
     }
 
     for (const auto& patch : BUILTIN_PATCHES) {
-        if (patch.title_id != title_id || patch.dlss_quality) {
+        if (patch.title_id != title_id || patch.dlss_quality || !patch.requires_patch.empty()) {
             continue;
         }
         const auto is_disabled = [&](std::string_view name) {
