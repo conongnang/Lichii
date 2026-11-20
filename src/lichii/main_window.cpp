@@ -1760,6 +1760,8 @@ void MainWindow::ConnectWidgetEvents() {
             &MainWindow::OnGameListPrepareShaderWarm);
     connect(game_list, &GameList::DeleteShaderWarmRequested, this,
             &MainWindow::OnGameListDeleteShaderWarm);
+    connect(game_list, &GameList::PrecompileShadersRequested, this,
+            &MainWindow::OnGameListPrecompileShaders);
     connect(game_list, &GameList::ExtractNupRequested, this, &MainWindow::OnGameListExtractNup);
     connect(game_list, &GameList::EditNupMetadataRequested, this,
             &MainWindow::OnGameListEditNupMetadata);
@@ -5126,21 +5128,38 @@ void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& 
     shader_warm_dialog->Start();
 }
 
-/// With precache_shaders on: a title precached before is precached again only when the driver or
-/// its precache file changed (the renderer checks). For one never precached, Ask asks whether to
-/// precache before the game starts. A title whose precache file is missing or stale (another cache
-/// version, an older builder) gets one built from its game files first. A stopped or failed build
+/// Precompile All Shaders: turning it on records the request and builds the precache file now; the
+/// compiling itself runs on the loading screen of the next start. Turning it off keeps the files.
+void MainWindow::OnGameListPrecompileShaders(u64 program_id, const std::string& game_path,
+                                             bool on) {
+    if (!SetShaderWarmRequested(program_id, on)) {
+        QMessageBox::warning(this, tr("Precompile All Shaders"),
+                             tr("The setting could not be saved in the shader folder."));
+        return;
+    }
+    LOG_INFO(Frontend, "Precompile all shaders for {:016x}: {}", program_id, on ? "on" : "off");
+    if (on) {
+        OnGameListPrepareShaderWarm(program_id, game_path);
+    }
+}
+
+/// With precache_shaders on, or Precompile All Shaders for the game: a title precached before is
+/// precached again only when the driver or its precache file changed (the renderer checks). For
+/// one never precached, Ask asks whether to precache before the game starts. A title whose
+/// precache file is missing or stale (another cache version, an older builder) gets one built
+/// from its game files first. A stopped or failed build
 /// starts the game with the file it had, or without precaching when there is none.
 void MainWindow::PrepareShaderPrecache(u64 title_id, const std::filesystem::path& game_path) {
     namespace ShaderWarm = VideoCommon::ShaderWarm;
     ShaderWarm::RequestWarmBeforeStart(false);
     const auto mode = Settings::values.precache_shaders.GetValue();
+    const auto warm_file = ShaderWarm::ComputeWarmPath(title_id);
+    const bool requested = title_id != 0 && ShaderWarm::WarmRequested(warm_file);
     // The precache runs where the disk shader cache loads.
-    if (title_id == 0 || mode == Settings::PrecacheShaders::Off ||
+    if (title_id == 0 || (mode == Settings::PrecacheShaders::Off && !requested) ||
         !Settings::values.use_disk_shader_cache.GetValue()) {
         return;
     }
-    const auto warm_file = ShaderWarm::ComputeWarmPath(title_id);
     const auto stale = ShaderWarm::WarmFilesStale(warm_file);
     const bool pending = ShaderWarm::WarmPending(title_id);
     if (!pending && !stale) {
@@ -5148,7 +5167,7 @@ void MainWindow::PrepareShaderPrecache(u64 title_id, const std::filesystem::path
         ShaderWarm::RequestWarmBeforeStart(true);
         return;
     }
-    if (pending && mode == Settings::PrecacheShaders::Ask) {
+    if (pending && mode == Settings::PrecacheShaders::Ask && !requested) {
         QMessageBox box(QMessageBox::Question, tr("Precache Shaders"),
                         tr("The shaders of this game are not precached yet. Precache them now?\n\n"
                            "The game starts when they are done. The first time, the game files "

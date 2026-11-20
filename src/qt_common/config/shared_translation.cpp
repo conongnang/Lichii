@@ -404,7 +404,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "the first time the game uses them: the compute shaders found in the game files. "
               "The first launch reads the game files and takes a few minutes; later launches "
               "only build what is new, until the GPU driver changes. The loading screen has a "
-              "Skip button.\nAsk asks at launch while the game has never been precached."));
+              "Skip button.\nAsk asks at launch while the game has never been precached.\n"
+              "Precompile All Shaders in a game's context menu does this for that game whatever "
+              "this says, and builds every shader its earlier sessions saved too."));
     INSERT(Settings, build_all_cached_shaders, tr("Build all cached shaders before game start"),
            tr("Builds every shader saved by earlier play sessions on the loading screen and keeps "
               "them built, so places you visited long ago don't stutter. Without it, only the "
