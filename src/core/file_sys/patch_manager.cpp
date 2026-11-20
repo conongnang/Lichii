@@ -552,6 +552,75 @@ constexpr std::array YOSHI_SCENE_PROFILE_RECORDS{
     BuiltinPatchRecord{0x7582677, YOSHI_SCENE_PROFILE_FULL, YOSHI_SCENE_PROFILE_ORIGINAL},
 };
 
+// Convert elapsed time to 60 Hz steps. Short steps keep a per-web fraction (x19+0x8f8).
+// The original clamp after this conversion still limits pauses to three steps; large
+// deltas go down the original path and do not add to the pending fraction.
+// The nine zero-filled .text alignment slots are listed for E0F3CCFA in the KaeGae
+// registry. Branches chain them without using LR. Each of eight BSS slots has an
+// address key and a double-precision fraction; a miss starts at zero.
+constexpr std::array<u8, 4> WEB_CARRY_ORIGINAL{0x16, 0x00, 0x38, 0x1E};
+constexpr std::array<u8, 4> WEB_CARRY_HOOK{0x51, 0x2D, 0x45, 0x14};
+constexpr std::array<u8, 28> WEB_CARRY_PADDING{};
+constexpr std::array<u8, 28> WEB_CARRY_ENTRY{
+    0x16, 0x00, 0x38, 0x1E, 0xED, 0x3B, 0xBB, 0xA9, 0xEF, 0x43, 0x01, 0xA9,
+    0xF0, 0x47, 0x01, 0xAD, 0x0D, 0x42, 0x3B, 0xD5, 0xED, 0x23, 0x00, 0xF9,
+    0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> WEB_CARRY_RANGE_CHECK{
+    0x0D, 0x00, 0x26, 0x1E, 0xED, 0x15, 0x00, 0x34, 0x0E, 0xF0, 0xA7, 0x52,
+    0xBF, 0x01, 0x0E, 0x6B, 0x82, 0x15, 0x00, 0x54, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 20> WEB_CARRY_SETUP{
+    0xEE, 0xB8, 0x01, 0xF0, 0xCE, 0x01, 0x04, 0x91, 0x6D, 0xE2, 0x23, 0x91,
+    0x0F, 0x00, 0x80, 0x52, 0x7B, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> WEB_CARRY_LOOKUP{
+    0xD0, 0x79, 0x6F, 0xF8, 0x1F, 0x02, 0x0D, 0xEB, 0xE0, 0xF2, 0xFF, 0x54,
+    0xEF, 0x05, 0x00, 0x91, 0xFF, 0x21, 0x00, 0xF1, 0x63, 0xFF, 0xFF, 0x54,
+    0x3A, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> WEB_CARRY_MISS{
+    0xCF, 0x81, 0x40, 0xB9, 0xF0, 0x05, 0x00, 0x11, 0x10, 0x0A, 0x00, 0x12,
+    0xD0, 0x81, 0x00, 0xB9, 0xCD, 0x79, 0x2F, 0xF8, 0x10, 0xE4, 0x00, 0x2F,
+    0x6B, 0xFF, 0xFF, 0x17,
+};
+constexpr std::array<u8, 12> WEB_CARRY_HIT{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x6F, 0xFC, 0x16, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> WEB_CARRY_CALC{
+    0x11, 0xC0, 0x22, 0x1E, 0x10, 0x2A, 0x71, 0x1E, 0x16, 0x02, 0x78, 0x1E,
+    0xD1, 0x02, 0x62, 0x1E, 0x10, 0x3A, 0x71, 0x1E, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 12> WEB_CARRY_STORE{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x2F, 0xFC, 0x4E, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> WEB_CARRY_DONE{
+    0xED, 0x23, 0x40, 0xF9, 0x0D, 0x42, 0x1B, 0xD5, 0xF0, 0x47, 0x41, 0xAD,
+    0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC5, 0xA8, 0xE2, 0xD1, 0xBA, 0x17,
+};
+constexpr std::array WEB_CARRY_RECORDS{
+    BuiltinPatchRecord{0x632D00, WEB_CARRY_HOOK, WEB_CARRY_ORIGINAL},
+    BuiltinPatchRecord{0x177E244, WEB_CARRY_ENTRY,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_ENTRY.size())},
+    BuiltinPatchRecord{0x177E2A8, WEB_CARRY_RANGE_CHECK,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_RANGE_CHECK.size())},
+    BuiltinPatchRecord{0x177E308, WEB_CARRY_SETUP,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_SETUP.size())},
+    BuiltinPatchRecord{0x177E504, WEB_CARRY_LOOKUP,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_LOOKUP.size())},
+    BuiltinPatchRecord{0x177E604, WEB_CARRY_MISS,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_MISS.size())},
+    BuiltinPatchRecord{0x177E368, WEB_CARRY_HIT,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_HIT.size())},
+    BuiltinPatchRecord{0x177E3C8, WEB_CARRY_CALC,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_CALC.size())},
+    BuiltinPatchRecord{0x177E428, WEB_CARRY_STORE,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_STORE.size())},
+    BuiltinPatchRecord{0x177E568, WEB_CARRY_DONE,
+                       std::span{WEB_CARRY_PADDING}.first(WEB_CARRY_DONE.size())},
+};
+constexpr std::array WEB_CARRY_STATE{BuiltinPatchState{0x4E9D100, 136}};
+
 constexpr std::array BUILTIN_PATCHES{
     // Ocarina of Time takes its "dynamic resolution disabled" path, so the 3D renders at full scale
     // instead of following the GPU-time controller down to its 480p floor.
@@ -660,6 +729,15 @@ constexpr std::array BUILTIN_PATCHES{
         .records = TEXT_SPEED_2X_RECORDS,
         .off_by_default = true,
         .group = "Text Speed",
+    },
+    BuiltinPatch{
+        .name = "Deku Tree floor web (FPS Unlock)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = WEB_CARRY_RECORDS,
+        .states = WEB_CARRY_STATE,
+        .requires_patch = FPS_UNLOCK_NAME,
     },
     BuiltinPatch{
         .name = "Full Scene Resolution with FXAA (built-in)",
