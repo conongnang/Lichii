@@ -515,11 +515,9 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     show();
 
 #ifdef ENABLE_UPDATE_CHECKER
+    // No update check at startup: it only runs from Help -> Check for Updates.
     connect(&update_watcher, &QFutureWatcher<UpdateChecker::CheckResult>::finished, this,
             &MainWindow::OnEmulatorUpdateAvailable);
-    if (UISettings::values.check_for_updates) {
-        CheckForUpdates(false);
-    }
 #endif
 
     connect(&nextendo_session_watcher,

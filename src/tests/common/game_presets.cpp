@@ -4,9 +4,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include "common/settings.h"
 
-TEST_CASE("Display filter defaults use ScaleForce and FXAA", "[game_presets]") {
+TEST_CASE("Display filter defaults use FSR 1 Soft and FXAA", "[game_presets]") {
     auto settings = std::make_unique<Settings::Values>();
+#ifdef __ANDROID__
     CHECK(settings->scaling_filter.GetDefault() == Settings::ScalingFilter::ScaleForce);
+#else
+    CHECK(settings->scaling_filter.GetDefault() == Settings::ScalingFilter::Fsr3);
+#endif
     CHECK(settings->anti_aliasing.GetDefault() == Settings::AntiAliasing::Fxaa);
 }
 

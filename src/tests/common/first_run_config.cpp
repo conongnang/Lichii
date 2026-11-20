@@ -101,8 +101,10 @@ void CheckFreshProfile() {
 
 void CheckLegacyProfile() {
     const auto& values = Settings::values;
-    CHECK(values.scaling_filter.GetValue() == Settings::ScalingFilter::ScaleForce);
-    CHECK(values.gpu_accuracy.GetValue() == Settings::GpuAccuracy::High);
+    // The built-in desktop defaults: FSR 1 Soft, Fast GPU accuracy and docked mode.
+    CHECK(values.scaling_filter.GetValue() == Settings::ScalingFilter::Fsr3);
+    CHECK(values.gpu_accuracy.GetValue() == Settings::GpuAccuracy::Low);
+    CHECK(values.use_docked_mode.GetValue() == Settings::ConsoleMode::Docked);
     CHECK(values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Cpu);
     CHECK_FALSE(values.async_presentation.GetValue());
     // Not waiting for shaders became every config's default, not only a seeded one.
