@@ -737,6 +737,17 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
     // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
     const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
+    // CheezyEmu 132cc46c9e: Polaris by device ID, since newer AMD drivers report shaderFloat16 on
+    // Polaris and the float16 test above misses them. Polaris 10/11/20/21/30 (RX 470-590),
+    // Polaris 12 (RX 540/550) and the RX 580 2048SP. Only limits pipeline build threads.
+    {
+        const u32 device_id = properties.properties.deviceID;
+        const bool is_polaris = properties.properties.vendorID == 0x1002 &&
+                                ((device_id >= 0x67C0 && device_id <= 0x67FF) ||
+                                 (device_id >= 0x6980 && device_id <= 0x699F) ||
+                                 device_id == 0x6FDF);
+        is_amd_legacy_gcn = is_amd_driver && (is_polaris || amd_gcn4_or_older);
+    }
     const bool device_float16 = features.shader_float16_int8.shaderFloat16;
     if (is_amd_driver) {
         // AMD drivers need a higher amount of Sets per Pool in certain circumstances like in XC2.
