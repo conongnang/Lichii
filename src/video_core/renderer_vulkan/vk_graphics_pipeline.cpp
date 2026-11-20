@@ -291,6 +291,17 @@ ConfigureFuncPtr ConfigureFunc(const std::array<bool, NUM_STAGES>& stages,
 }
 
 std::atomic<std::chrono::nanoseconds::rep> hold_time_ns{};
+// A draw held for its pipeline runs the build on the waiting thread when no worker has started it,
+// instead of waiting behind every NeedNow build queued before it (port of zortos293/Lichii#321
+// via conongnang/Lichii 3ca57a1a4b; Ocarina held draws up to 952 ms per 10 s without it).
+// EDEN_NX2_HELD_BUILD_INLINE=0 waits for the workers as before.
+bool HeldBuildInline() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_HELD_BUILD_INLINE");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
 // EDEN_NX2_TEXTURE_MEMO_VERIFY=1, read once: draws resolved from a memo are also resolved in full
 // and compared.
 bool TextureMemoVerify() {
@@ -1551,7 +1562,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             scheduler.Record([this](vk::CommandBuffer) {
                 const VideoCommon::Nx2Profile::Scope scope{
                     VideoCommon::Nx2Profile::Zone::PipelineWait};
-                build->Wait(!worker_only_build);
+                build->Wait(!worker_only_build || HeldBuildInline());
             });
         }
         scheduler.Record([this, descriptor_data, groups = mesh_groups, capacity = mesh_capacity,
@@ -1686,7 +1697,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         scheduler.Record([this](vk::CommandBuffer) {
             const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
-            build->Wait(!worker_only_build);
+            build->Wait(!worker_only_build || HeldBuildInline());
             hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count(),
