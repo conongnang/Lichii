@@ -439,6 +439,74 @@ constexpr std::array FPS_UNLOCK_RECORDS{
     BuiltinPatchRecord{0x3C46B30, CLOTH_DT_ROUTINE_S2, {}, true},
 };
 
+// Convert 2 * step to game seconds. Short steps keep a per-clock fraction (x19+0x3c);
+// all other amounts retain the retail conversion, including the ordinary 60 FPS case.
+// The nine zero-filled .text alignment slots are listed for E0F3CCFA in the KaeGae
+// registry. Branches chain them without using LR. Each of eight BSS slots has an
+// address key and a double-precision fraction; a miss starts at zero.
+constexpr std::array<u8, 4> CLOCK_CARRY_ORIGINAL{0x08, 0x00, 0x38, 0x1E};
+constexpr std::array<u8, 4> CLOCK_CARRY_HOOK{0xC9, 0xBE, 0x4E, 0x14};
+constexpr std::array<u8, 28> CLOCK_CARRY_PADDING{};
+constexpr std::array<u8, 28> CLOCK_CARRY_ENTRY{
+    0x08, 0x00, 0x38, 0x1E, 0xED, 0x3B, 0xBB, 0xA9, 0xEF, 0x43, 0x01, 0xA9,
+    0xF0, 0x47, 0x01, 0xAD, 0x0D, 0x42, 0x3B, 0xD5, 0xED, 0x23, 0x00, 0xF9,
+    0x53, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> CLOCK_CARRY_RANGE_CHECK{
+    0x0D, 0x00, 0x26, 0x1E, 0xED, 0x0E, 0x00, 0x34, 0x0E, 0x00, 0xA8, 0x52,
+    0xBF, 0x01, 0x0E, 0x6B, 0x82, 0x0E, 0x00, 0x54, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 20> CLOCK_CARRY_SETUP{
+    0x0E, 0xB9, 0x01, 0x90, 0xCE, 0x01, 0x00, 0x91, 0x6D, 0xF2, 0x00, 0x91,
+    0x0F, 0x00, 0x80, 0x52, 0xB3, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> CLOCK_CARRY_LOOKUP{
+    0xD0, 0x79, 0x6F, 0xF8, 0x1F, 0x02, 0x0D, 0xEB, 0xE0, 0xEB, 0xFF, 0x54,
+    0xEF, 0x05, 0x00, 0x91, 0xFF, 0x21, 0x00, 0xF1, 0x63, 0xFF, 0xFF, 0x54,
+    0x3A, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 28> CLOCK_CARRY_MISS{
+    0xCF, 0x81, 0x40, 0xB9, 0xF0, 0x05, 0x00, 0x11, 0x10, 0x0A, 0x00, 0x12,
+    0xD0, 0x81, 0x00, 0xB9, 0xCD, 0x79, 0x2F, 0xF8, 0x10, 0xE4, 0x00, 0x2F,
+    0x33, 0xFF, 0xFF, 0x17,
+};
+constexpr std::array<u8, 12> CLOCK_CARRY_HIT{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x6F, 0xFC, 0x16, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> CLOCK_CARRY_CALC{
+    0x11, 0xC0, 0x22, 0x1E, 0x10, 0x2A, 0x71, 0x1E, 0x08, 0x02, 0x78, 0x1E,
+    0x11, 0x01, 0x62, 0x1E, 0x10, 0x3A, 0x71, 0x1E, 0x13, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 12> CLOCK_CARRY_STORE{
+    0xCD, 0x01, 0x01, 0x91, 0xB0, 0x79, 0x2F, 0xFC, 0x16, 0x00, 0x00, 0x14,
+};
+constexpr std::array<u8, 24> CLOCK_CARRY_DONE{
+    0xED, 0x23, 0x40, 0xF9, 0x0D, 0x42, 0x1B, 0xD5, 0xF0, 0x47, 0x41, 0xAD,
+    0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC5, 0xA8, 0x62, 0x40, 0xB1, 0x17,
+};
+constexpr std::array CLOCK_CARRY_RECORDS{
+    BuiltinPatchRecord{0x3CDFC0, CLOCK_CARRY_HOOK, CLOCK_CARRY_ORIGINAL},
+    BuiltinPatchRecord{0x177DAE4, CLOCK_CARRY_ENTRY,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_ENTRY.size())},
+    BuiltinPatchRecord{0x177DC48, CLOCK_CARRY_RANGE_CHECK,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_RANGE_CHECK.size())},
+    BuiltinPatchRecord{0x177DCA8, CLOCK_CARRY_SETUP,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_SETUP.size())},
+    BuiltinPatchRecord{0x177DF84, CLOCK_CARRY_LOOKUP,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_LOOKUP.size())},
+    BuiltinPatchRecord{0x177E084, CLOCK_CARRY_MISS,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_MISS.size())},
+    BuiltinPatchRecord{0x177DD08, CLOCK_CARRY_HIT,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_HIT.size())},
+    BuiltinPatchRecord{0x177DD68, CLOCK_CARRY_CALC,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_CALC.size())},
+    BuiltinPatchRecord{0x177DDC8, CLOCK_CARRY_STORE,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_STORE.size())},
+    BuiltinPatchRecord{0x177DE28, CLOCK_CARRY_DONE,
+                       std::span{CLOCK_CARRY_PADDING}.first(CLOCK_CARRY_DONE.size())},
+};
+constexpr std::array CLOCK_CARRY_STATE{BuiltinPatchState{0x4E9D000, 136}};
+
 // Dark's timer state at 0 and the water slots to 0x98.
 constexpr std::array DYNAMIC_FPS_STATES{BuiltinPatchState{0x4E9FE00, 0x98}};
 // Dynamic FPS's state and the sound gate at 0xA0, then the step counters on a page of their own:
@@ -529,6 +597,15 @@ constexpr std::array BUILTIN_PATCHES{
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = DYNAMIC_FPS_RECORDS,
         .states = DYNAMIC_FPS_STATES,
+    },
+    BuiltinPatch{
+        .name = "OoT day/night clock (FPS Unlock)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = CLOCK_CARRY_RECORDS,
+        .states = CLOCK_CARRY_STATE,
+        .requires_patch = FPS_UNLOCK_NAME,
     },
     // The NVIDIA DLSS quality lowers Ocarina's render resolution under Max Resolution, since DLSS
     // replaces the game's own 1440p -> 4K upscale and takes whatever the game renders.
@@ -1256,7 +1333,7 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
             const auto overlaps =
                 FindBuiltinCheatOverlaps(title_id, std::span{&patch.name, 1}, load_cheats());
             if (!overlaps.empty()) {
-                LOG_INFO(Loader, "    - Skipping \"{}\": cheat \"{}\" uses the hook or code cave",
+                LOG_INFO(Loader, "    - Skipping \"{}\": cheat \"{}\" overlaps the patch",
                          patch.name, overlaps.front().cheat);
                 continue;
             }

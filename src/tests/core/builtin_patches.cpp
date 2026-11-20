@@ -1234,6 +1234,69 @@ TEST_CASE("Built-in text speed is off until checked in Add-Ons", "[patch_manager
     }
 }
 
+TEST_CASE("FPS Unlock guards the OoT day/night clock carry", "[patch_manager][oot_carry]") {
+    constexpr size_t Site = sizeof(Loader::NSOHeader) + 0x3CDFC0;
+    constexpr size_t Entry = sizeof(Loader::NSOHeader) + 0x177DAE4;
+    constexpr size_t LastWord = sizeof(Loader::NSOHeader) + 0x177DE3C;
+    constexpr size_t State = sizeof(Loader::NSOHeader) + 0x4E9D000;
+    constexpr u32 Original = 0x1E380008;
+    constexpr u32 Branch = 0x144EBEC9;
+    auto nso = MakeDynamicMain();
+    std::memcpy(nso.data() + Site, &Original, sizeof(Original));
+    std::optional<u32> mod;
+    bool installs = false;
+    bool unlock = true;
+    bool disable_fps = false;
+    std::string_view cheat;
+    SECTION("Matching build, instructions and padding") {
+        installs = true;
+    }
+    SECTION("Different build") {
+        nso[offsetof(Loader::NSOHeader, build_id)] ^= 1;
+        unlock = false;
+    }
+    SECTION("Changed original instruction") {
+        nso[Site] ^= 1;
+    }
+    SECTION("Occupied final alignment slot") {
+        nso[LastWord + 3] = 1;
+    }
+    SECTION("Occupied BSS") {
+        nso[State + 135] = 1;
+    }
+    SECTION("IPS uses the final alignment slot") {
+        mod = NopInstruction;
+    }
+    SECTION("A static cheat writes the BSS remainder") {
+        cheat = "[Carry overlap]\n04000000 04E9D040 00000000\n";
+    }
+    SECTION("Dark's Dynamic FPS without FPS Unlock") {
+        disable_fps = true;
+        unlock = false;
+    }
+    SECTION("FPS Unlock was requested but could not apply") {
+        nso[SoundEntryOffset] ^= 1;
+        unlock = false;
+    }
+    PatchManagerTestContext context{mod, LastWord};
+    if (disable_fps) {
+        Settings::values.disabled_addons[OcarinaTitleId] = {std::string{FpsUnlock}};
+    }
+    if (!cheat.empty()) {
+        context.WriteCheat(cheat);
+    }
+    const auto patched = context.Manager().PatchNSO(nso, "main");
+    REQUIRE(WordAt(patched, Site) == (installs ? Branch : WordAt(nso, Site)));
+    REQUIRE(WordAt(patched, SoundEntryOffset) ==
+            (unlock ? SoundEntryBranchInstruction : WordAt(nso, SoundEntryOffset)));
+    REQUIRE(WordAt(patched, Entry) == (installs ? Original : 0));
+    if (installs) {
+        REQUIRE(WordAt(patched, LastWord) != 0);
+    } else {
+        REQUIRE(WordAt(patched, LastWord) == mod.value_or(WordAt(nso, LastWord)));
+    }
+}
+
 TEST_CASE("Unchecked add-on lists store off-by-default built-ins when checked", "[patch_manager]") {
     const std::string Double{"Text Speed 2x (built-in)"};
     const std::string Quadruple{"Text Speed 4x (built-in)"};
