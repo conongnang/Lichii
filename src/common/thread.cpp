@@ -465,6 +465,72 @@ struct WindowsCpuSets {
     bool hybrid = false;
 };
 
+/// Ryzen X3D parts have one CCD with a larger L3: the emulator's threads hand work to each other
+/// thousands of times a frame, and keeping time-critical ones on that CCD's cache was worth
+/// ~1.5 fps of 57 in Ocarina of Time on a 9950X3D (port of conongnang/Lichii fbc5eb8c3d). CPUs
+/// whose L3s are all the same size are left alone; EDEN_HYBRID_CORES=0 turns this off too.
+template <typename Placement>
+void PlaceOnLargestL3(WindowsCpuSets& result, const std::vector<Placement>& placements) {
+    DWORD cache_length = 0;
+    GetLogicalProcessorInformationEx(RelationCache, nullptr, &cache_length);
+    if (cache_length == 0) {
+        return;
+    }
+    std::vector<u8> caches(cache_length);
+    if (!GetLogicalProcessorInformationEx(
+            RelationCache, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(caches.data()),
+            &cache_length)) {
+        return;
+    }
+    struct L3 {
+        WORD group;
+        KAFFINITY mask;
+        DWORD size;
+    };
+    std::vector<L3> l3s;
+    for (DWORD offset = 0; offset < cache_length;) {
+        const auto* info =
+            reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(caches.data() + offset);
+        if (info->Size == 0) {
+            break;
+        }
+        if (info->Relationship == RelationCache && info->Cache.Level == 3 &&
+            (info->Cache.Type == CacheUnified || info->Cache.Type == CacheData)) {
+            l3s.push_back({info->Cache.GroupMask.Group, info->Cache.GroupMask.Mask,
+                           info->Cache.CacheSize});
+        }
+        offset += info->Size;
+    }
+    if (l3s.size() < 2) {
+        return;
+    }
+    const auto largest = std::max_element(
+        l3s.begin(), l3s.end(), [](const L3& a, const L3& b) { return a.size < b.size; });
+    if (std::all_of(l3s.begin(), l3s.end(),
+                    [&](const L3& l3) { return l3.size == largest->size; })) {
+        return;
+    }
+    std::vector<ULONG> on_largest;
+    std::vector<ULONG> others;
+    for (const Placement& placement : placements) {
+        const bool inside = placement.group == largest->group &&
+                            placement.logical_index < sizeof(KAFFINITY) * 8 &&
+                            ((largest->mask >> placement.logical_index) & 1) != 0;
+        (inside ? on_largest : others).push_back(placement.id);
+    }
+    // As for hybrid CPUs: about ten time-critical threads need room.
+    if (others.empty() || on_largest.size() < 8) {
+        return;
+    }
+    result.performance = std::move(on_largest);
+    result.efficiency = std::move(others);
+    result.hybrid = true;
+    LOG_INFO(Common,
+             "CPU with a larger L3 ({} KiB) on {} of {} logical processors: time-critical threads "
+             "stay on them (EDEN_HYBRID_CORES=0 turns this off)",
+             largest->size / 1024, result.performance.size(), placements.size());
+}
+
 const WindowsCpuSets& CpuSets() {
     static const WindowsCpuSets sets = [] {
         WindowsCpuSets result;
@@ -491,6 +557,12 @@ const WindowsCpuSets& CpuSets() {
                  GetCurrentProcess(), 0)) {
             return result;
         }
+        struct Placement {
+            ULONG id;
+            WORD group;
+            BYTE logical_index;
+        };
+        std::vector<Placement> placements;
         u8 best = 0;
         for (ULONG offset = 0; offset + sizeof(SYSTEM_CPU_SET_INFORMATION) <= length;) {
             const auto* info =
@@ -503,6 +575,8 @@ const WindowsCpuSets& CpuSets() {
                     (static_cast<u32>(info->CpuSet.Group) << 8) | info->CpuSet.CoreIndex;
                 result.processors.push_back({static_cast<u32>(info->CpuSet.Id), core,
                                              static_cast<u8>(info->CpuSet.EfficiencyClass)});
+                placements.push_back({info->CpuSet.Id, info->CpuSet.Group,
+                                      info->CpuSet.LogicalProcessorIndex});
                 best = (std::max)(best, static_cast<u8>(info->CpuSet.EfficiencyClass));
             }
             offset += info->Size;
@@ -528,6 +602,9 @@ const WindowsCpuSets& CpuSets() {
                      "Hybrid CPU: {} performance and {} efficiency logical processors, "
                      "time-critical threads stay on the performance cores",
                      result.performance.size(), result.efficiency.size());
+        }
+        if (result.efficiency.empty()) {
+            PlaceOnLargestL3(result, placements);
         }
         return result;
     }();
