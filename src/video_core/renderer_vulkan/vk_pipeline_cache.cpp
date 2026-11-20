@@ -54,6 +54,7 @@
 #include "video_core/nx2_profile.h"
 #include "video_core/nx2_stutter_trace.h"
 #include "video_core/pipeline_cache_files.h"
+#include "video_core/pipeline_cache_policy.h"
 #include "video_core/renderer_vulkan/async_draw_policy.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
@@ -1014,6 +1015,13 @@ void PipelineCache::SaveUsedPipelines() {
                               VideoCommon::ShaderCacheV2::EncodeUsed(record));
 }
 
+u64 PipelineCache::KeyedAttributeTypes(u64 attribute_types) const noexcept {
+    return attribute_types_keyed ? VideoCommon::KeyedAttributeTypes(
+                                       attribute_types, graphics_key.unique_hashes,
+                                       vertex_attribute_masks)
+                                 : attribute_types;
+}
+
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
 
     if (!RefreshStages(graphics_key.unique_hashes)) {
@@ -1027,7 +1035,22 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
         vertex_input_lent = false;
         maxwell3d->dirty.flags[Dirty::VertexInput] = true;
     }
+    // Refresh only rewrites the attribute types when the vertex input changes, so the masked copy
+    // in the key must not carry over to the next programs.
+    if (attribute_types_keyed) {
+        graphics_key.state.attribute_types = vertex_attribute_types;
+    }
     graphics_key.state.Refresh(*maxwell3d, dynamic_features);
+    vertex_attribute_types = graphics_key.state.attribute_types;
+    // With dynamic vertex input, types of attributes the programs don't read would split their
+    // pipelines by whatever the game left in those registers (Ocarina: up to 20 keys for the same
+    // shaders, each built on the GPU thread). Port of conongnang/Lichii c17402beb8, whose shader
+    // caches hold keys masked this way. Mesh draws keep lending their key (MeshVertexInputs).
+    attribute_types_keyed = dynamic_features.has_dynamic_vertex_input && !mesh_draw;
+    if (attribute_types_keyed) {
+        graphics_key.state.attribute_types = VideoCommon::KeyedAttributeTypes(
+            vertex_attribute_types, graphics_key.unique_hashes, vertex_attribute_masks);
+    }
     if (mesh_draw) {
         // Before the transitions, which hold the lender's key
         if (!mesh_vertex_inputs_seeded) {

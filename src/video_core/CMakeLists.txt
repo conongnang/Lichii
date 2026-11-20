@@ -130,6 +130,7 @@ add_library(video_core STATIC
     memory_manager.cpp
     memory_manager.h
     page_filter.h
+    pipeline_cache_policy.h
     native_lowering.cpp
     native_lowering.h
     native_qmd.h

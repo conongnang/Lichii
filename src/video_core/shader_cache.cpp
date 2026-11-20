@@ -37,8 +37,33 @@
 #include "video_core/shader_cache_v2/records.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/util.h"
+#include "video_core/pipeline_cache_policy.h"
 
 namespace VideoCommon {
+
+u64 VertexAttributeMaskOf(const Shader::Environment& env) {
+    // Port of conongnang/Lichii c17402beb8 (from Frizti/Fritchii 55bba8812c).
+    // EDEN_NX2_KEY_ALL_ATTRIBUTES=1 keeps every attribute type in the keys, as before.
+    static const bool key_all = [] {
+        const char* value = std::getenv("EDEN_NX2_KEY_ALL_ATTRIBUTES");
+        return value != nullptr && value[0] == '1';
+    }();
+    if (key_all) {
+        return ~u64{0};
+    }
+    const Shader::Stage stage{env.ShaderStage()};
+    if (stage != Shader::Stage::VertexB || !env.IsNativeProgram()) {
+        return ~u64{0};
+    }
+    // The hardware only fetches the attributes in the input map, so a read outside it is never
+    // valid (none of Ocarina of Time's 1,250 cached vertex programs makes one).
+    std::array<std::array<bool, 4>, Tegra::Engines::Maxwell3D::Regs::NumVertexAttributes>
+        input_generic{};
+    for (size_t index = 0; index < input_generic.size(); ++index) {
+        input_generic[index] = env.SPH().vtg.InputGeneric(index);
+    }
+    return VertexAttributeMask(input_generic);
+}
 
 void ShaderCache::InvalidateRegion(VAddr addr, size_t size) {
     std::scoped_lock lock{invalidation_mutex};
@@ -285,6 +310,7 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
             }
         }
         shader_infos[index] = shader_info;
+        vertex_attribute_masks[index] = shader_info->vertex_attribute_mask;
         unique_hashes[index] = shader_info->unique_hash;
         if (mesh && (program == Tegra::Engines::Maxwell3D::Regs::ShaderType::VertexB ||
                      program == Tegra::Engines::Maxwell3D::Regs::ShaderType::Tessellation)) {
@@ -574,6 +600,7 @@ const ShaderInfo* ShaderCache::MakeShaderInfo(GenericEnvironment& env, VAddr cpu
         info->size_bytes = env.ReadSizeBytes();
     }
     info->lowered_native = env.LoweredNative();
+    info->vertex_attribute_mask = VertexAttributeMaskOf(env);
     if (const auto record = env.TakeProgramRecord(); record && shader_cache_v2) {
         shader_cache_v2->RecordProgram(*record);
     }

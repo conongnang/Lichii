@@ -589,7 +589,8 @@ GraphicsPipeline* RasterizerVulkan::TakeReusableDraw(bool is_indexed, bool is_in
     // records them for every draw); only the type class of each attribute is in the pipeline key.
     if (maxwell3d->dirty.flags[Dirty::VertexInput] &&
         (!draw.pipeline->HasDynamicVertexInput() ||
-         FixedPipelineState::DynamicAttributeTypes(maxwell3d->regs) !=
+         pipeline_cache.KeyedAttributeTypes(
+             FixedPipelineState::DynamicAttributeTypes(maxwell3d->regs)) !=
              draw.pipeline->DynamicAttributeTypes())) {
         return full(FullDraw::VertexInput);
     }

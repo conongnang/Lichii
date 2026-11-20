@@ -139,6 +139,10 @@ public:
 
     [[nodiscard]] GraphicsPipeline* CurrentGraphicsPipeline();
 
+    /// Vertex attribute types as the current key holds them: with dynamic vertex input, only those
+    /// the bound programs read (VideoCommon::KeyedAttributeTypes), unless a mesh draw lent its key.
+    [[nodiscard]] u64 KeyedAttributeTypes(u64 attribute_types) const noexcept;
+
     void TickFrame();
 
     [[nodiscard]] ComputePipeline* CurrentComputePipeline(u64& native_key);
@@ -303,6 +307,8 @@ private:
     std::optional<std::chrono::steady_clock::time_point> prebuild_load_begin;
 
     GraphicsPipelineCacheKey graphics_key{};
+    u64 vertex_attribute_types{}; ///< graphics_key's attribute types before the programs' mask
+    bool attribute_types_keyed{};  ///< graphics_key holds them masked
     GraphicsPipeline* current_pipeline{};
     /// Native mesh draws' vertex input, lent by the first key of each pipeline
     MeshVertexInputs<GraphicsPipelineCacheKey> mesh_vertex_inputs;
