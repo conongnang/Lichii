@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <mutex>
 #include <new>
 
@@ -71,6 +72,13 @@ u64 DeviceMemory::PrepareNativeExecution(bool has_39bit_address_space) {
 // spawns), whose map calls stalled 10-14 ms while a pass ran.
 void DeviceMemory::TrimZeroPages(std::stop_token stop) {
     using namespace std::chrono_literals;
+    // A/B (conongnang/Lichii, which has no trim): each pass is 0.6-1.5 s of working-set changes
+    // during play, and the pages it trims fault back in (Ocarina: 10 GB zero-filled in 7 min).
+    // Off unless EDEN_NX2_ZERO_TRIM=1.
+    if (const char* value = std::getenv("EDEN_NX2_ZERO_TRIM"); value == nullptr || value[0] != '1') {
+        LOG_INFO(HW_Memory, "All-zero guest page trimming off (EDEN_NX2_ZERO_TRIM=1 turns it on)");
+        return;
+    }
     Common::SetCurrentThreadName("ZeroTrim");
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
     constexpr size_t Busy = size_t{64} << 20;
