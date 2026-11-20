@@ -42,6 +42,7 @@
 #include "video_core/gpu_trace/recorder.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/host1x/host1x.h"
+#include "video_core/nx2.h"
 #include "video_core/nx2_async_readback.h"
 #include "video_core/rasterizer_download_area.h"
 
@@ -1088,9 +1089,20 @@ struct Memory::Impl {
             // It is often the case the games like to access wildly different addresses. Hence why I propose
             // we should let the compiler just do it's thing...
             if (current_area.last_address != subaddress) {
+                // Switch 2 titles: collected without asking OnCPUWrite under both caches'
+                // mutexes, which the split's back holds through each draw; the back applies
+                // collected writes to every cache when it gathers them, before each draw (port of
+                // conongnang/Lichii 886c0f3d2e from Frizti's Fritchii: Ocarina walk hitches 5 -> 2
+                // of 6 runs on an RX 9070 XT). EDEN_NX2_GUEST_FAST=0 asks OnCPUWrite as before.
+                static const bool guest_fast = [] {
+                    const char* value = std::getenv("EDEN_NX2_GUEST_FAST");
+                    return value == nullptr || value[0] != '0';
+                }();
+                const bool collect_unasked = guest_fast && address != 0 && size != 0 &&
+                                             Tegra::g_nx2_ampere.load(std::memory_order_relaxed);
                 // Short circuit the need to check for address/size
-                auto const do_collection = (address != 0 && size != 0)
-                    && system.GPU().OnCPUWrite(address, size);
+                auto const do_collection = collect_unasked || ((address != 0 && size != 0)
+                    && system.GPU().OnCPUWrite(address, size));
                 if (do_collection) {
                     current_area.last_address = subaddress;
                 } else {
