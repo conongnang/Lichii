@@ -34,6 +34,15 @@
 
 namespace FS = Common::FS;
 
+namespace {
+
+std::string GameConfigPath(const std::string& config_file) {
+    return FS::PathToUTF8String(FS::GetEdenPath(FS::EdenPath::ConfigDir) / "custom" /
+                                FS::ToU8String(config_file));
+}
+
+} // namespace
+
 Config::Config(const ConfigType config_type)
     : type(config_type), global{config_type == ConfigType::GlobalConfig} {}
 
@@ -50,7 +59,7 @@ void Config::Initialize(const std::string& config_name) {
         Reload();
         break;
     case ConfigType::PerGameConfig:
-        config_loc = FS::PathToUTF8String(fs_config_loc / "custom" / FS::ToU8String(config_file));
+        config_loc = GameConfigPath(config_file);
         void(FS::CreateParentDir(config_loc));
         SetUpIni();
         Reload();
@@ -71,6 +80,60 @@ void Config::Initialize(const std::optional<std::string> config_path) {
     void(FS::CreateParentDir(config_loc));
     SetUpIni();
     Reload();
+}
+
+namespace {
+
+// Writes into a game's config file without loading it into the settings.
+class GameConfigWriter final : public Config {
+public:
+    explicit GameConfigWriter(const std::string& config_name) : Config{ConfigType::PerGameConfig} {
+        FrontendCommon::CheckLegacyProfileBeforeConfig();
+        config_loc = GameConfigPath(fmt::format("{}.ini", config_name));
+        void(FS::CreateParentDir(config_loc));
+        SetUpIni();
+    }
+
+    void Save(const Settings::BasicSetting& setting, const std::string& value) {
+        const std::string key = AdjustKey(setting.GetLabel());
+        BeginGroup(Settings::TranslateCategory(setting.GetCategory()));
+        WriteBooleanSetting(std::string(key).append("\\use_global"), false);
+        WriteBooleanSetting(std::string(key).append("\\default"),
+                            value == setting.DefaultToString());
+        WriteStringSetting(key, value);
+        EndGroup();
+        WriteToIni();
+    }
+
+private:
+    void ReloadAllValues() override {}
+    void SaveAllValues() override {}
+    void ReadHidbusValues() override {}
+    void ReadDebugControlValues() override {}
+    void ReadPathValues() override {}
+    void ReadShortcutValues() override {}
+    void ReadUIValues() override {}
+    void ReadUIGamelistValues() override {}
+    void ReadUILayoutValues() override {}
+    void ReadMultiplayerValues() override {}
+    void SaveHidbusValues() override {}
+    void SaveDebugControlValues() override {}
+    void SavePathValues() override {}
+    void SaveShortcutValues() override {}
+    void SaveUIValues() override {}
+    void SaveUIGamelistValues() override {}
+    void SaveUILayoutValues() override {}
+    void SaveMultiplayerValues() override {}
+    std::vector<Settings::BasicSetting*>& FindRelevantList(Settings::Category category) override {
+        return Settings::values.linkage.by_category[category];
+    }
+};
+
+} // namespace
+
+void Config::SaveGameValue(const std::string& config_name, const Settings::BasicSetting& setting,
+                           const std::string& value) {
+    GameConfigWriter{config_name}.Save(setting, value);
 }
 
 void Config::WriteToIni() const {

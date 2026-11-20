@@ -5128,8 +5128,9 @@ void MainWindow::OnGameListPrepareShaderWarm(u64 program_id, const std::string& 
     shader_warm_dialog->Start();
 }
 
-/// Precompile All Shaders: turning it on records the request and builds the precache file now; the
-/// compiling itself runs on the loading screen of the next start. Turning it off keeps the files.
+/// Precompile All Shaders: turning it on records the request, sets the game's precache to Always
+/// and builds the precache file now; the compiling itself runs on the loading screen of the next
+/// start. Turning it off keeps the files and the game's precache setting.
 void MainWindow::OnGameListPrecompileShaders(u64 program_id, const std::string& game_path,
                                              bool on) {
     if (!SetShaderWarmRequested(program_id, on)) {
@@ -5139,6 +5140,8 @@ void MainWindow::OnGameListPrecompileShaders(u64 program_id, const std::string& 
     }
     LOG_INFO(Frontend, "Precompile all shaders for {:016x}: {}", program_id, on ? "on" : "off");
     if (on) {
+        Config::SaveGameValue(fmt::format("{:016X}", program_id), Settings::values.precache_shaders,
+                              std::to_string(static_cast<u32>(Settings::PrecacheShaders::Always)));
         OnGameListPrepareShaderWarm(program_id, game_path);
     }
 }
