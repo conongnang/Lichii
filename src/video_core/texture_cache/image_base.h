@@ -63,6 +63,9 @@ enum class ImageFlagBits : u32 {
     /// Its own address space mapped it to more than one device range when it was made (with
     /// Sparse only when the texture says so).
     NonContiguous = 1 << 24,
+    /// A render target its lookup created (Switch 2 titles); deleted early once it goes unused
+    /// while the cache is over its minimum size (TextureCache::EvictDeadRenderTargets).
+    TransientTarget = 1 << 25,
 };
 DECLARE_ENUM_FLAG_OPERATORS(ImageFlagBits)
 

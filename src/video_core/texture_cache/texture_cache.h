@@ -156,8 +156,9 @@ TextureCache<P>::TextureCache(Runtime& runtime_, Tegra::MaxwellDeviceMemoryManag
 }
 
 template <class P>
-void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
+void TextureCache<P>::RunGarbageCollector(bool out_of_memory, u64 trim_before) {
     const StutterTrace::SiteScope site{StutterTrace::Site::TextureCollect};
+    const bool scene_trim = trim_before != 0 && trim_before < frame_tick;
     host_oom_retry_frame = 0;
     bool high_priority_mode = false;
     bool aggressive_mode = false;
@@ -212,8 +213,8 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     bool async_downloads = download_overlaps && AsyncOverlapDownloadsEnabled();
     KeepRanges keep;
     WritebackRanges::TickedRanges keep_ticks;
-    const auto CanEvict = [this, &high_priority_mode, &aggressive_mode, &evict_old_costly,
-                           &evict_bad_overlaps](ImageId image_id,
+    const auto CanEvict = [this, &aggressive_mode, &evict_old_costly, &evict_bad_overlaps,
+                           out_of_memory, scene_trim](ImageId image_id,
                                                 bool* out_must_download = nullptr) {
         const auto& image = slot_images[image_id];
         if (True(image.flags & ImageFlagBits::IsDecoding) ||
@@ -225,15 +226,21 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         if (out_must_download != nullptr) {
             *out_must_download = must_download;
         }
+        // An image the GPU wrote waits for the GPU to copy it back first (a hitch each: turning the
+        // camera in Ocarina deleted 304 of 408 images in 40 waits), so only past the critical
+        // threshold (port of conongnang/Lichii d7b86404f2). A region trim takes no image the GPU
+        // wrote, so it never downloads or writes back.
         if ((!aggressive_mode && !evict_old_costly &&
              True(image.flags & ImageFlagBits::CostlyLoad)) ||
-            (!high_priority_mode && must_download)) {
+            (scene_trim &&
+             True(image.flags & (ImageFlagBits::GpuModified | ImageFlagBits::BadOverlap))) ||
+            (must_download && !aggressive_mode && !out_of_memory)) {
             return false;
         }
         return true;
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode, &CanEvict,
-                          &evict_bad_overlaps, &keep, &keep_ticks, out_of_memory,
+                          &evict_bad_overlaps, &keep, &keep_ticks, out_of_memory, scene_trim,
                           &overlap_downloads, download_overlaps, async_downloads](ImageId image_id) {
         if (num_iterations == 0) {
             return true;
@@ -345,6 +352,10 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
                               : high_priority_mode ? "gc-high-priority"
                                                    : "gc";
         DeleteImage(image_id, !download_queued && image.scale_tick > frame_tick + 5);
+        if (scene_trim) {
+            ++scene_trim_images;
+            return total_used_memory <= scene_trim_target;
+        }
         if (out_of_memory) {
             return false;
         }
@@ -402,6 +413,11 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
                                ? static_cast<double>(it->second) / static_cast<double>(block.block_size)
                                : 0.0;
                 }
+                // Images copied back first (a GPU wait each) go after those simply dropped.
+                const Image& image = slot_images[image_id];
+                if (IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap)) {
+                    fill += 2.0;
+                }
                 ordered.emplace_back(fill, image_id);
             }
             std::stable_sort(ordered.begin(), ordered.end(),
@@ -415,6 +431,18 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
             lru_cache.ForEachItemBelow(last_tick, Cleanup);
         }
     };
+    if (scene_trim) {
+        // A region trim (TickFrame): images unused since the load began go, oldest first (so the
+        // region just left goes last), costly loads included but none that must be copied back.
+        if (total_used_memory <= scene_trim_target) {
+            return;
+        }
+        high_priority_mode = true;
+        aggressive_mode = true;
+        num_iterations = 256;
+        lru_cache.ForEachItemBelow(trim_before, Cleanup);
+        return;
+    }
     Configure(false);
     // Images newer ones partly overwrote (BadOverlap: their bytes belong to the newer images, so
     // they are dropped without a download) get the mode's age, not the retention floor. Ocarina
@@ -1225,6 +1253,161 @@ void TextureCache<P>::ApplyThresholdOverrides(bool log) {
 }
 
 template <class P>
+bool TextureCache<P>::TickSceneTrim(bool out_of_memory) {
+    // Port of conongnang/Lichii 91f7cf7e35. A region change (Ocarina: a warp song or a waypoint
+    // into a large region) makes hundreds of MiB of textures within a few seconds; the regions
+    // left behind keep theirs until the collector evicts them near the budget, mid-play. Once a
+    // burst has made EDEN_NX2_SCENE_TRIM_MIB (default 256, 0 = off), images unused since it began
+    // go, oldest first, while the rest of the region loads, down to 3/5 of expected_memory (at
+    // least minimum_memory; EDEN_NX2_SCENE_TRIM_TARGET_MIB sets it). Only images the GPU did not
+    // write, so the trim never waits for a download.
+    static const u64 scene_load_bytes = [] {
+        const char* value = std::getenv("EDEN_NX2_SCENE_TRIM_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 256ULL) << 20;
+    }();
+    static const char* const scene_target_env = std::getenv("EDEN_NX2_SCENE_TRIM_TARGET_MIB");
+    const u64 created = std::exchange(frame_created_bytes, 0);
+    if (scene_load_bytes == 0) {
+        return false;
+    }
+    const u64 scene_target = scene_target_env != nullptr
+                                 ? std::strtoull(scene_target_env, nullptr, 10) << 20
+                                 : (std::max)(minimum_memory, expected_memory / 5 * 3);
+    constexpr u64 SceneBurstFrameBytes = 4_MiB;
+    constexpr u64 SceneQuietFrames = 30;
+    // A burst starting within SceneMergeFrames of the last one's end is the same load: a load
+    // that paused split into bursts 2-4 s apart, and each trimmed the first part's images.
+    constexpr u64 SceneMergeFrames = 300;
+    if (created >= SceneBurstFrameBytes) {
+        if (!scene_burst && frame_tick - scene_burst_end > SceneMergeFrames) {
+            scene_burst_trimmed = false;
+            scene_burst_start = frame_tick;
+            scene_burst_bytes = 0;
+        }
+        scene_burst = true;
+        scene_burst_bytes += created;
+        scene_quiet_frames = 0;
+    } else if (scene_burst) {
+        scene_burst_bytes += created;
+        if (++scene_quiet_frames >= SceneQuietFrames) {
+            scene_burst = false;
+            scene_burst_end = frame_tick;
+        }
+    }
+    if (scene_burst && !scene_burst_trimmed && scene_trim_before == 0 &&
+        scene_burst_bytes >= scene_load_bytes && scene_burst_start > 1 &&
+        total_used_memory > scene_target) {
+        scene_burst_trimmed = true;
+        scene_trim_before = scene_burst_start - 1;
+        scene_trim_target = scene_target;
+        scene_trim_frames = 0;
+        scene_trim_images = 0;
+        scene_trim_start_memory = total_used_memory;
+    }
+    if (scene_trim_before == 0 || out_of_memory) {
+        return false;
+    }
+    // At most 256 images a frame, so the load does not stall at once.
+    const u64 before = scene_trim_images;
+    RunGarbageCollector(false, scene_trim_before);
+    if (scene_trim_images == before || ++scene_trim_frames >= 300 ||
+        total_used_memory <= scene_trim_target) {
+        LOG_INFO(HW_GPU,
+                 "Region change: {} MiB of new images so far; trimmed {} images unused since, "
+                 "device memory {} -> {} MiB (target {} MiB)",
+                 scene_burst_bytes >> 20, scene_trim_images, scene_trim_start_memory >> 20,
+                 total_used_memory >> 20, scene_trim_target >> 20);
+        scene_trim_before = 0;
+    }
+    return true;
+}
+
+template <class P>
+void TextureCache<P>::EvictDeadRenderTargets() {
+    // Port of conongnang/Lichii 91f7cf7e35 (from zortos293/Lichii#1285). Render targets their
+    // lookup created and that went unused for DeadTargetFrames are deleted now, before the
+    // age-based collector reaches them. In Ocarina of Time's Market the crowds make a new target
+    // every couple of frames; the dead ones piled up until the collector evicted them mid-play
+    // near the budget, waiting for the GPU to copy each back. These are marked stale instead, the
+    // way the collector handles an image it doesn't download. Past minimum_memory only.
+    // EDEN_NX2_DEAD_TARGETS=0 turns it off.
+    static const bool enabled = [] {
+        const char* value = std::getenv("EDEN_NX2_DEAD_TARGETS");
+        return value == nullptr || std::strtoull(value, nullptr, 10) != 0;
+    }();
+    static constexpr u64 DeadTargetFrames = 8;
+    // At most this many deletions a frame, so a long queue doesn't turn into one long frame.
+    static constexpr u32 MaxEvictionsPerFrame = 64;
+    // How often a target found still in use is checked again before it counts as a lasting one.
+    static constexpr u32 MaxChecks = 4;
+    // Waiting list size kept while the cache is under its minimum size.
+    static constexpr size_t MaxWaiting = 8192;
+    if (!enabled || total_used_memory <= minimum_memory) {
+        if (transient_targets.size() > MaxWaiting) {
+            transient_targets.erase(transient_targets.begin(),
+                                    transient_targets.begin() +
+                                        static_cast<std::ptrdiff_t>(transient_targets.size() -
+                                                                    MaxWaiting));
+        }
+        return;
+    }
+    u32 evicted = 0;
+    for (size_t budget = transient_targets.size(); budget != 0 && !transient_targets.empty();
+         --budget) {
+        if (evicted >= MaxEvictionsPerFrame || total_used_memory <= minimum_memory) {
+            break;
+        }
+        TransientTarget entry = transient_targets.front();
+        if (frame_tick - entry.check_tick < DeadTargetFrames) {
+            break;
+        }
+        transient_targets.pop_front();
+        if (!slot_images.contains(entry.id)) {
+            continue;
+        }
+        Image& image = slot_images[entry.id];
+        if (image.allocation_tick != entry.allocation_tick ||
+            False(image.flags & ImageFlagBits::TransientTarget) ||
+            False(image.flags & ImageFlagBits::Registered)) {
+            continue;
+        }
+        const u64 last_use = lru_cache.GetTick(image.lru_index);
+        if (frame_tick - last_use < DeadTargetFrames ||
+            True(image.flags & ImageFlagBits::IsDecoding)) {
+            // Still in use: check again later; one used for long is a lasting target.
+            if (++entry.survived < MaxChecks) {
+                entry.check_tick = frame_tick;
+                transient_targets.push_back(entry);
+            } else {
+                image.flags &= ~ImageFlagBits::TransientTarget;
+            }
+            continue;
+        }
+        if (OverlapWritebacksEnabled() && True(image.flags & ImageFlagBits::GpuModified) &&
+            HasGuestRange(image)) {
+            // As the collector notes a GPU-written image it drops: its data is lost.
+            NoteOverlapWriteback(image, true);
+        }
+        MarkStale(image); // before UntrackImage (see MarkStale)
+        if (True(image.flags & ImageFlagBits::Tracked)) {
+            UntrackImage(image, entry.id);
+        }
+        trace_delete_flags = static_cast<u32>(image.flags);
+        trace_delete_downloaded = false;
+        UnregisterImage(entry.id);
+        trace_delete_reason = "dead-target";
+        DeleteImage(entry.id, false);
+        ++transient_evictions;
+        ++evicted;
+    }
+    if (frame_tick % 600 == 0 && transient_evictions != logged_transient_evictions) {
+        LOG_INFO(HW_GPU, "Dead render targets deleted early: {} so far, {} waiting",
+                 transient_evictions, transient_targets.size());
+        logged_transient_evictions = transient_evictions;
+    }
+}
+
+template <class P>
 void TextureCache<P>::LogThresholds() const {
     LOG_INFO(HW_GPU, "Texture cache thresholds: expected {} MiB, critical {} MiB, minimum {} MiB",
              expected_memory >> 20, critical_memory >> 20, minimum_memory >> 20);
@@ -1648,9 +1831,11 @@ void TextureCache<P>::TickFrame() {
         out_of_memory = failed != seen_failed_images;
         seen_failed_images = failed;
     }
+    EvictDeadRenderTargets();
     // A forced collect for memory spilled to host memory collects as at the critical threshold
     // for this frame, without the re-upload of images left out that a failed image gets.
-    if (out_of_memory || spill_collect || total_used_memory > minimum_memory) {
+    const bool trimmed = TickSceneTrim(out_of_memory || spill_collect);
+    if (!trimmed && (out_of_memory || spill_collect || total_used_memory > minimum_memory)) {
         RunGarbageCollector(out_of_memory || spill_collect);
     }
     if (out_of_memory) {
@@ -4563,6 +4748,7 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     Image& new_image = slot_images[new_image_id];
 
     new_image.allocation_tick = frame_tick;
+    last_created_image = new_image_id;
     {
         // Which shapes are being created (periodic log): format, type, levels, layers, size.
         const u64 key = (u64{static_cast<u32>(new_info.format)} << 56) |
@@ -4577,6 +4763,11 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         }
         ++images_created;
         ++churn.created;
+        // Compressed images only, for the region trim: render targets never (Ocarina's market
+        // makes a new render target every few frames, which would keep a burst from settling).
+        if (IsPixelFormatASTC(new_info.format) || IsPixelFormatBCn(new_info.format)) {
+            frame_created_bytes += ImageMemoryBytes(new_image);
+        }
         churn.joins += join_overlap_ids.empty() ? 0 : 1;
     }
 
@@ -4987,6 +5178,7 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
     }
     ImageId image_id{};
     bool delete_state = has_deleted_images;
+    last_created_image = ImageId{};
     do {
         has_deleted_images = false;
         image_id = FindOrInsertImage(info, gpu_addr);
@@ -4999,6 +5191,15 @@ ImageViewId TextureCache<P>::FindRenderTargetView(const ImageInfo& info, GPUVAdd
         return ImageViewId{};
     }
     Image& image = slot_images[image_id];
+    // A render target this lookup just created, on a Switch 2 title, is a candidate for early
+    // deletion once it goes unused (EvictDeadRenderTargets). Its upload is unchanged.
+    if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) && image_id == last_created_image &&
+        image.modification_tick == 0 && False(image.flags & ImageFlagBits::TransientTarget) &&
+        False(image.flags & (ImageFlagBits::Sparse | ImageFlagBits::SparseLayers |
+                             ImageFlagBits::SparseTiles | ImageFlagBits::Unbacked))) {
+        image.flags |= ImageFlagBits::TransientTarget;
+        transient_targets.push_back({image_id, image.allocation_tick, frame_tick, 0});
+    }
     const ImageViewType view_type = RenderTargetImageViewType(info);
     SubresourceBase base;
     if (image.info.type == ImageType::Linear) {

@@ -538,8 +538,46 @@ private:
 
     void OnGPUASRegister(size_t map_id) final override;
 
-    /// Runs the Garbage Collector.
-    void RunGarbageCollector(bool out_of_memory);
+    /// Runs the Garbage Collector. With trim_before, a region trim instead: evicts only images
+    /// last used at or before that frame and not written by the GPU, down to scene_trim_target.
+    void RunGarbageCollector(bool out_of_memory, u64 trim_before = 0);
+
+    // Region changes (TickFrame, port of conongnang/Lichii 91f7cf7e35): a load shows up as a burst
+    // of new compressed images. Once it is large enough, images unused since it began belong to
+    // the regions left behind and are trimmed during the load, instead of piling up until the
+    // collector evicts them mid-play.
+    u64 frame_created_bytes{};  ///< Device memory of the compressed images made this frame
+    bool scene_burst{};
+    bool scene_burst_trimmed{}; ///< This burst already started a trim
+    u64 scene_burst_start{};    ///< Frame the burst began
+    u64 scene_burst_end{};      ///< Frame the last burst settled
+    u64 scene_burst_bytes{};
+    u64 scene_quiet_frames{};   ///< Frames since the burst last made enough images
+    u64 scene_trim_before{};    ///< Trim images last used at or before this frame; 0 = no trim
+    u64 scene_trim_target{};    ///< Device memory the trim stops at
+    u64 scene_trim_frames{};
+    u64 scene_trim_images{};
+    u64 scene_trim_start_memory{};
+    /// Updates the region change state with this frame's images and runs a pending trim.
+    /// True when it ran the collector this frame.
+    bool TickSceneTrim(bool out_of_memory);
+
+    /// Render targets their lookup created, to check for early deletion (EvictDeadRenderTargets),
+    /// with their allocation tick and how often they were found still in use.
+    struct TransientTarget {
+        ImageId id;
+        u64 allocation_tick;
+        u64 check_tick;
+        u32 survived;
+    };
+    std::deque<TransientTarget> transient_targets;
+    u64 transient_evictions{};
+    u64 logged_transient_evictions{};
+    /// Image made by the latest JoinImages call; FindRenderTargetView uses it to tell a target it
+    /// just created from one that already existed.
+    ImageId last_created_image{};
+    /// Deletes dead render targets early while the cache is over its minimum size.
+    void EvictDeadRenderTargets();
 
     /// Find or create an image view in the guest descriptor table
     ImageViewId VisitImageView(u32 index, bool compute);
