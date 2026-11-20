@@ -2387,6 +2387,22 @@ void ReportUnsupportedMeshPipeline(const GraphicsPipelineCacheKey& key, const Pr
                 position, generic, other, others, info.primitive_lines.size(), primitive_attributes,
                 has_pixel, with_task, per_primitive, non_triangle);
 }
+
+void LogSkippedPipelineLookup(bool mesh) {
+    if (mesh) {
+        static std::atomic<u64> mesh_skipped{};
+        if ((mesh_skipped.fetch_add(1, std::memory_order_relaxed) & 255) == 0) {
+            LOG_INFO(Render_Vulkan, "Async shaders: {} mesh pipeline lookups skipped",
+                     mesh_skipped.load(std::memory_order_relaxed));
+        }
+    }
+    static std::atomic<u64> skipped{};
+    if ((skipped.fetch_add(1, std::memory_order_relaxed) & 255) == 0) {
+        // Counts lookups, not draws: a draw state can look its pipeline up more than once.
+        LOG_INFO(Render_Vulkan, "Async shaders: {} pipeline lookups skipped for unbuilt pipelines",
+                 skipped.load(std::memory_order_relaxed));
+    }
+}
 } // Anonymous namespace
 
 GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
@@ -2394,8 +2410,18 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     if (is_new) {
+        const bool skip_mesh = scheduled_prebuild && SkipPendingMeshDraw();
+        if (skip_mesh) {
+            auto prebuilt = scheduled_prebuild->TryTakeReady(graphics_key);
+            if (!prebuilt) {
+                graphics_cache.erase(pair);
+                LogSkippedPipelineLookup(true);
+                return nullptr;
+            }
+            pipeline = std::move(*prebuilt);
+        }
         ReportNewPipelineKey(graphics_key);
-        if (scheduled_prebuild) {
+        if (scheduled_prebuild && !skip_mesh) {
             std::optional<std::chrono::steady_clock::duration> waited;
             pipeline = scheduled_prebuild->Take(graphics_key, &waited);
             if (waited) {
@@ -2590,9 +2616,14 @@ void PipelineCache::LogBoundedWaits() {
     window = std::chrono::steady_clock::now();
 }
 
+bool PipelineCache::SkipPendingMeshDraw() const {
+    return use_asynchronous_shaders && Settings::values.skip_unbuilt_mesh_draws.GetValue() &&
+           maxwell3d->GetNativeMacroEngine().native_turing && maxwell3d->regs.IsMeshEnabled();
+}
+
 /// Returns `pipeline` when it is built or the current draw must wait for it, and nullptr when the
-/// draw may be skipped while it builds (asynchronous shaders; native draws only with
-/// EDEN_NX2_ASYNC_DISCARD=1). Each nullptr returned for an unbuilt pipeline is counted for the log.
+/// draw may be skipped while it builds. Each nullptr returned for an unbuilt pipeline is counted
+/// for the log.
 GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexcept {
     if (pipeline->IsBuilt()) {
         return pipeline;
@@ -2607,7 +2638,7 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     // A native draw counts as depth-tested only when every render target it writes color into
     // was first written in an earlier frame, which the title redraws every frame: Mario Kart World
     // bakes terrain once with depth-tested draws (b7980efd7), and a bound depth buffer alone
-    // doesn't test (Eglantine #874). Mesh draws always wait.
+    // doesn't test (Eglantine #874). Mesh draws wait unless the mesh skip setting is on.
     const auto writes_color = [&regs](u32 rt_index) {
         return rt_index < Maxwell::NumRenderTargets &&
                regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
@@ -2652,16 +2683,12 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
         }
         }
     }
-    if (discard) {
-        static std::atomic<u64> skipped{};
-        if ((skipped.fetch_add(1, std::memory_order_relaxed) & 255) == 0) {
-            // Counts lookups, not draws: a draw state can look its pipeline up more than once.
-            LOG_INFO(Render_Vulkan,
-                     "Async shaders: {} pipeline lookups skipped for unbuilt pipelines",
-                     skipped.load(std::memory_order_relaxed));
-        }
+    const bool skip_mesh = SkipPendingMeshDraw();
+    if (discard || skip_mesh) {
+        LogSkippedPipelineLookup(skip_mesh);
+        return nullptr;
     }
-    return discard ? nullptr : pipeline;
+    return pipeline;
 }
 
 bool PipelineCache::SkipUnbuiltDispatch(ComputePipeline& pipeline, bool outputs_hold_gpu_data) {

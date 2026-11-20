@@ -698,6 +698,9 @@ struct Values {
                                                          true,
                                                          true};
 
+    SwitchableSetting<bool> skip_unbuilt_mesh_draws{linkage, false, "skip_unbuilt_mesh_draws",
+                                                    Category::RendererAdvanced};
+
     // Precache shaders before the game starts: the compute programs in the game files are built on
     // the loading screen, so the driver's cache holds them before the game first uses them.
     // Ask: the desktop app asks at launch while the game has no finished precache; where nothing

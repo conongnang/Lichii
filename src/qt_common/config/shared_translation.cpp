@@ -416,7 +416,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
               "what Switch 2 work does when its pipeline is still building. Only work that redraws "
               "what an earlier frame drew can be skipped: draws that are depth-tested into a "
               "target drawn before, and compute passes whose outputs the GPU wrote before. Other "
-              "work always waits, so nothing drawn or computed once goes missing.\n"
+              "work waits unless the separate mesh skip option applies.\n"
               "Wait stalls the GPU until the pipeline is ready (no missing effects, but long "
               "stalls on new content). Skip drops that work, which can leave an effect missing "
               "for a few frames. Bounded (default) waits up to the time below per frame, then "
@@ -425,6 +425,11 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
            tr("Used by the Bounded mode: the most time per frame that Switch 2 draws and compute "
               "passes may wait in total for pipelines that are still building. Once spent, the "
               "remaining unbuilt work of that frame that can be skipped is skipped."));
+    INSERT(Settings, skip_unbuilt_mesh_draws, tr("Skip Switch 2 mesh draws with unbuilt shaders"),
+           tr("Only applies when \"Don't wait for shaders that are still compiling\" is on. Skips "
+              "Switch 2 mesh draws while their pipelines build, even in Wait mode. This can "
+              "reduce stalls, but some objects may not appear until their shaders finish "
+              "building."));
     INSERT(Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
            tr("Required by some games.\nThis setting only exists for Intel "
               "proprietary drivers and may crash if enabled.\nCompute pipelines are always enabled "

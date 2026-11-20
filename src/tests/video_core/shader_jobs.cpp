@@ -864,6 +864,54 @@ TEST_CASE("A lookup waits for a prebuild a worker is building", "[video_core][sh
     REQUIRE(builds == 1);
 }
 
+TEST_CASE("A nonwaiting lookup leaves the running prebuild registered until it completes",
+          "[video_core][shader_jobs][prebuild]") {
+    struct BlockingPipeline {
+        Gate& building;
+        Gate& release;
+        int builds{};
+
+        void Build() {
+            ++builds;
+            building.Open();
+            release.Wait();
+        }
+        bool Failed() const {
+            return false;
+        }
+    };
+
+    ShaderJobScheduler scheduler{Config(1, 1)};
+    Gate building;
+    Gate release;
+    Vulkan::ScheduledPrebuild<int, BlockingPipeline> prebuild{scheduler};
+    const auto translate = [&] {
+        return std::make_unique<BlockingPipeline>(building, release);
+    };
+    ShaderJobHandle job;
+    REQUIRE(prebuild.Add(1, 0, 0, translate, &job));
+    building.Wait();
+
+    auto lookup = std::async(std::launch::async, [&] { return prebuild.TryTakeReady(1); });
+    const auto status = lookup.wait_for(2s);
+    const bool still_registered =
+        status == std::future_status::ready && !prebuild.Add(1, 0, 0, translate);
+    release.Open();
+    REQUIRE(status == std::future_status::ready);
+    REQUIRE_FALSE(lookup.get().has_value());
+    REQUIRE(still_registered);
+
+    job.Wait();
+    const auto ready = prebuild.TryTakeReady(1);
+    REQUIRE(ready.has_value());
+    REQUIRE(*ready != nullptr);
+    REQUIRE((*ready)->builds == 1);
+    const auto missing = prebuild.TryTakeReady(1);
+    REQUIRE(missing.has_value());
+    REQUIRE(*missing == nullptr);
+    REQUIRE(prebuild.Finished()->taken_unfinished == 0);
+}
+
 TEST_CASE("Prebuilds built in the background are taken without building again",
           "[video_core][shader_jobs]") {
     ShaderJobScheduler scheduler{Config(2, 2)};
