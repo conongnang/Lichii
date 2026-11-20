@@ -11,6 +11,14 @@ on:
         description: Build Windows with Nsight Aftermath GPU crash dumps (test builds only, no NVIDIA files shipped)
         type: boolean
         default: false
+      release_tag:
+        description: Release tag (empty = build-<run number>, published as a pre-release; set = a full release, e.g. stable-4)
+        type: string
+        default: ""
+      release_title:
+        description: Release title (empty = the automatic one)
+        type: string
+        default: ""
   push:
     branches:
       - nx2-experimental
@@ -38,6 +46,8 @@ permissions:
 # eglantine.profdata; bump it when a refreshed profile needs a newer LLVM.
 env:
   PGO_LLVM_VERSION: "23"
+  # The release tag, baked into every binary as LICHII_BUILD_TAG.
+  RELEASE_TAG: ${{ inputs.release_tag || format('build-{0}', github.run_number) }}
 
 # A running build is never cancelled: it finishes and publishes. A push meanwhile queues one build;
 # a later push replaces it, so the newest commit builds as soon as the running one is done.
@@ -65,7 +75,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="build-${GITHUB_RUN_NUMBER}"
+          tag="${RELEASE_TAG}"
           if tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null); then
             if [ "$tag_sha" != "$GITHUB_SHA" ]; then
               echo "Release tag $tag points to $tag_sha instead of $GITHUB_SHA"
@@ -317,7 +327,7 @@ jobs:
             -DVulkanHeaders_FORCE_BUNDLED=ON
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON
             -DENABLE_UPDATE_CHECKER=OFF
-            -DLICHII_BUILD_TAG=build-${{ github.run_number }}
+            -DLICHII_BUILD_TAG=${{ env.RELEASE_TAG }}
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }}
             -DUSE_DISCORD_PRESENCE=OFF
             -DUSE_CCACHE=ON
@@ -365,7 +375,7 @@ jobs:
             -DENABLE_QT_TRANSLATION=ON \
             -DLICHII_USE_BUNDLED_SDL3=ON \
             -DENABLE_UPDATE_CHECKER=OFF \
-            -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
+            -DLICHII_BUILD_TAG=${{ env.RELEASE_TAG }} \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
             -DUSE_DISCORD_PRESENCE=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache \
@@ -398,7 +408,7 @@ jobs:
             -DVulkanHeaders_FORCE_BUNDLED=ON \
             -DVulkanUtilityLibraries_FORCE_BUNDLED=ON \
             -DENABLE_UPDATE_CHECKER=OFF \
-            -DLICHII_BUILD_TAG=build-${{ github.run_number }} \
+            -DLICHII_BUILD_TAG=${{ env.RELEASE_TAG }} \
             -DLICHII_BUILD_PLATFORM=${{ matrix.platform }} \
             -DUSE_DISCORD_PRESENCE=OFF \
             -DUSE_CCACHE=ON
@@ -719,14 +729,16 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_RELEASE_TITLE: ${{ inputs.release_title }}
         run: |
           set -euo pipefail
-          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/build-${GITHUB_RUN_NUMBER}" --jq '.object.sha')
+          tag="${RELEASE_TAG}"
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" --jq '.object.sha')
           if [ "$tag_sha" != "$GITHUB_SHA" ]; then
-            echo "Release tag build-${GITHUB_RUN_NUMBER} points to $tag_sha instead of $GITHUB_SHA"
+            echo "Release tag ${tag} points to $tag_sha instead of $GITHUB_SHA"
             exit 1
           fi
-          tag="build-${GITHUB_RUN_NUMBER}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
 
           link() { [[ -e "dist/$2" ]] && echo "[$1](${base}/$2)" || true; }
@@ -784,26 +796,36 @@ jobs:
           ${pgo_note}
           EOF
 
+          # A named release (release_tag) is a full release with its own title; the automatic
+          # build-<run number> ones stay pre-releases.
+          release_kind=(--prerelease)
+          title="Lichii ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})"
+          if [ -n "${INPUT_RELEASE_TAG}" ]; then
+            release_kind=(--latest)
+            title="${INPUT_RELEASE_TITLE:-Lichii ${INPUT_RELEASE_TAG} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})}"
+          fi
           gh release create "${tag}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
-            --prerelease \
-            --title "Lichii ${GITHUB_REF_NAME} build ${GITHUB_RUN_NUMBER} (${GITHUB_SHA::7})" \
+            "${release_kind[@]}" \
+            --title "${title}" \
             --notes-file notes.md
 
-      # LICHII_BUILD_TAG is baked into every binary as build-<run number>, and the update checker
-      # compares release tags against it. A release whose tag or title names another run would be
-      # skipped or offered wrongly, so fail the run instead of leaving it published.
-      - name: Verify the release tag matches the run number
+      # LICHII_BUILD_TAG is baked into every binary as the release tag, and the update checker
+      # compares release tags against it. A release whose tag names another run would be skipped
+      # or offered wrongly, so fail the run instead of leaving it published.
+      - name: Verify the release tag matches the run
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          expected="build-${GITHUB_RUN_NUMBER}"
+          expected="${RELEASE_TAG}"
           published_tag=$(gh release view "$expected" --repo "${GITHUB_REPOSITORY}" --json tagName --jq '.tagName')
           published_title=$(gh release view "$expected" --repo "${GITHUB_REPOSITORY}" --json name --jq '.name')
-          if [ "$published_tag" != "$expected" ] || [[ "$published_title" != *" build ${GITHUB_RUN_NUMBER} ("* ]]; then
+          if [ "$published_tag" != "$expected" ] ||
+             { [ -z "${INPUT_RELEASE_TAG}" ] && [[ "$published_title" != *" build ${GITHUB_RUN_NUMBER} ("* ]]; }; then
             echo "Release is tagged '$published_tag' and titled '$published_title', expected tag $expected and a title naming build ${GITHUB_RUN_NUMBER}"
             exit 1
           fi
