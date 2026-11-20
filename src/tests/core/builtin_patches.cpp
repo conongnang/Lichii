@@ -114,7 +114,7 @@ constexpr size_t ClothDtRoutineS0Offset = sizeof(Loader::NSOHeader) + 0x3C46B00;
 constexpr size_t ClothDtRoutineS2Offset = sizeof(Loader::NSOHeader) + 0x3C46B30;
 constexpr size_t ClothDtRoutineSize = 48;
 constexpr std::string_view ClothDtRoutineHead =
-    "D0810090104A44F9100240F9111A40B9101191521091A772310600513F02106B3132901A31060011";
+    "D0810090104A44F9100240F9111A40B91011915210B1A772310600513F02106B3132901A31060011";
 
 constexpr size_t StepRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46900;
 constexpr size_t AmbientRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46B60;
