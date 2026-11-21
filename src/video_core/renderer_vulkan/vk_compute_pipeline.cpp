@@ -699,6 +699,10 @@ ComputePipeline::ConfigureResult ComputePipeline::Configure(
     }
     part.reset();
 
+    if (guest_descriptor_queue.HasRejectedTexelBuffer()) {
+        return ConfigureResult::Failed;
+    }
+
     RescalingPushConstant rescaling;
     const VideoCommon::SamplerId* samplers_it{samplers.data()};
     const VideoCommon::ImageViewInOut* views_it{views.data()};

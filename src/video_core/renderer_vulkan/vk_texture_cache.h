@@ -288,6 +288,9 @@ public:
                          std::array<f32, 2> motion_scale);
     std::unique_ptr<Fsr3Upscaler> fsr3_upscaler;
     bool fsr3_unsupported{};
+    /// The backend that last drew a DLSS replacement and why, so each change is logged once.
+    std::string_view last_upscale_backend;
+    std::string_view last_upscale_reason;
 
     /// The LOD bias Ocarina's FSR adds to mipmapped samplers this session (0 for other games or
     /// upscalers), resolved on first use.

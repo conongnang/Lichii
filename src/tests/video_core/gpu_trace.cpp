@@ -12,6 +12,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/core.h"
+#include "tests/common/temp_dir.h"
 #include "tests/core/system_test_context.h"
 #include "video_core/control/channel_state.h"
 #include "video_core/dma_pusher.h"
@@ -25,10 +26,6 @@
 
 namespace {
 using namespace VideoCommon::GpuTrace;
-
-std::filesystem::path TempTrace(const char* name) {
-    return std::filesystem::temp_directory_path() / name;
-}
 
 /// Rewrites the format version in a trace's header.
 void SetVersion(const std::filesystem::path& path, u32 version) {
@@ -56,7 +53,8 @@ void Append(std::vector<u8>& bytes, const T& value) {
 } // Anonymous namespace
 
 TEST_CASE("GPU trace records read back in order, blobs stored once", "[video_core][gpu_trace]") {
-    const auto path = TempTrace("lichii-gpu-trace-roundtrip.lxtrace");
+    const Tests::TempDir directory{"lichii-gpu-trace-roundtrip"};
+    const auto path = directory / "trace.lxtrace";
     const std::vector<u8> page(PageSize, 0x5a);
     {
         Writer writer{path};
@@ -84,11 +82,11 @@ TEST_CASE("GPU trace records read back in order, blobs stored once", "[video_cor
         CHECK(types == std::vector{RecordType::SmmuMap, RecordType::Blob, RecordType::Memory,
                                    RecordType::Memory, RecordType::SnapshotEnd, RecordType::End});
     }
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("GPU trace reader rejects a truncated file", "[video_core][gpu_trace]") {
-    const auto path = TempTrace("lichii-gpu-trace-truncated.lxtrace");
+    const Tests::TempDir directory{"lichii-gpu-trace-truncated"};
+    const auto path = directory / "trace.lxtrace";
     REQUIRE(WriteSampleTrace(path));
     const auto size = std::filesystem::file_size(path);
     std::filesystem::resize_file(path, size / 2);
@@ -102,11 +100,11 @@ TEST_CASE("GPU trace reader rejects a truncated file", "[video_core][gpu_trace]"
         CHECK(!ended);
         CHECK(!reader.Error().empty());
     }
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("The sample GPU trace has a snapshot, submits and presents", "[video_core][gpu_trace]") {
-    const auto path = TempTrace("lichii-gpu-trace-sample.lxtrace");
+    const Tests::TempDir directory{"lichii-gpu-trace-sample"};
+    const auto path = directory / "trace.lxtrace";
     REQUIRE(WriteSampleTrace(path));
     {
         Reader reader{path};
@@ -140,12 +138,12 @@ TEST_CASE("The sample GPU trace has a snapshot, submits and presents", "[video_c
         CHECK(submits == 2);
         CHECK(presents == 4);
     }
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("GPU trace reader reads format 1 traces, not newer ones than its own",
           "[video_core][gpu_trace]") {
-    const auto path = TempTrace("lichii-gpu-trace-version.lxtrace");
+    const Tests::TempDir directory{"lichii-gpu-trace-version"};
+    const auto path = directory / "trace.lxtrace";
     {
         Writer writer{path};
         REQUIRE(writer.IsOpen());
@@ -171,7 +169,6 @@ TEST_CASE("GPU trace reader reads format 1 traces, not newer ones than its own",
         Reader reader{path};
         CHECK_FALSE(reader.Error().empty());
     }
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("A format 1 trace's pusher and QMD state records restore",
@@ -187,7 +184,8 @@ TEST_CASE("A format 1 trace's pusher and QMD state records restore",
 
     // A format 1 pusher record is this build's with the DMA semaphore's three words in place of
     // the copy and inline-to-memory registers.
-    const auto path = TempTrace("lichii-gpu-trace-v1-state.lxtrace");
+    const Tests::TempDir directory{"lichii-gpu-trace-v1-state"};
+    const auto path = directory / "trace.lxtrace";
     {
         Writer writer{path};
         REQUIRE(writer.IsOpen());
@@ -263,7 +261,6 @@ TEST_CASE("A format 1 trace's pusher and QMD state records restore",
             }
         }
     }
-    std::filesystem::remove(path);
     REQUIRE(captured.size() == sizeof(address) + state.size());
     CHECK(std::memcmp(captured.data(), &address, sizeof(address)) == 0);
     // The padding byte is the compiler's.

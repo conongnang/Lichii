@@ -20,6 +20,7 @@
 
 #include "common/logging.h"
 #include "common/scope_exit.h"
+#include "core/core.h"
 #include "core/crypto/key_manager.h"
 #include "core/file_sys/card_image.h"
 #include "core/file_sys/content_archive.h"
@@ -34,10 +35,14 @@
 #include "core/file_sys/ips_layer.h"
 #include "core/file_sys/partition_filesystem.h"
 #include "core/file_sys/program_metadata.h"
+#include "core/file_sys/registered_cache.h"
 #include "core/file_sys/romfs.h"
 #include "core/file_sys/submission_package.h"
 #include "core/file_sys/vfs/vfs_vector.h"
+#include "core/hle/service/acc/profile_manager.h"
 #include "core/loader/loader.h"
+#include "core/loader/nsp.h"
+#include "tests/common/test_log.h"
 
 namespace {
 
@@ -378,11 +383,84 @@ std::vector<u8> MakeDiscoveryNca(u64 title_id, NcaHeader::ContentType type,
     return bytes;
 }
 
+TEST_CASE("NSP application discovery preserves a standalone Switch 2 Edition ID",
+          "[core][file_sys][home_menu]") {
+    constexpr u64 Base = 0x0100152000022000ULL;
+    constexpr u64 Edition = 0x04004D300C5AE001ULL;
+    std::vector<std::pair<std::string, std::vector<u8>>> files;
+    for (const u64 id : {Base, Edition}) {
+        CNMTHeader header{};
+        header.title_id = id;
+        header.type = TitleType::Application;
+        header.table_offset = sizeof(OptionalHeader);
+        header.number_content_entries = 1;
+        ContentRecord record{};
+        record.nca_id.fill(id == Base ? 0x11 : 0x22);
+        record.type = ContentRecordType::Program;
+        const CNMT cnmt{header, {}, {record}, {}};
+        files.emplace_back(std::to_string(id) + ".cnmt.nca",
+                           MakeDiscoveryNca(id, NcaHeader::ContentType::Meta,
+                                            MakePfs0WithFiles({{"title.cnmt", cnmt.Serialize()}})));
+        const std::string program_name(32, id == Base ? '1' : '2');
+        files.emplace_back(program_name + ".nca",
+                           MakeDiscoveryNca(id, NcaHeader::ContentType::Program,
+                                            MakePfs0WithFiles({{"main", {0}}})));
+    }
+    const NSP nsp{MakeFile(MakePfs0WithFiles(files))};
+    CHECK(nsp.GetApplicationProgramTitleIDs() == std::vector<u64>{Base, Edition});
+    const NSP selected{MakeFile(MakePfs0WithFiles(files)), Edition};
+    CHECK(selected.GetProgramTitleID() == Edition);
+}
+
+TEST_CASE("Packed NSP update input uses the CNMT update type", "[core][file_sys][boot-inputs]") {
+    constexpr u64 Base = 0x0100ABCD00010000ULL;
+    const u64 update_id = GetUpdateTitleID(Base);
+    TitleType update_type = TitleType::Update;
+    SECTION("a correctly typed update is found") {}
+    SECTION("an application-typed update remains supported") {
+        update_type = TitleType::Application;
+    }
+
+    const auto meta_nca = [](u64 id, TitleType type, u8 content_id) {
+        CNMTHeader header{};
+        header.title_id = id;
+        header.type = type;
+        header.table_offset = sizeof(OptionalHeader);
+        header.number_content_entries = 1;
+        ContentRecord record{};
+        record.nca_id.fill(content_id);
+        record.type = ContentRecordType::Program;
+        const CNMT cnmt{header, {}, {record}, {}};
+        return MakeDiscoveryNca(id, NcaHeader::ContentType::Meta,
+                                MakePfs0WithFiles({{"title.cnmt", cnmt.Serialize()}}));
+    };
+    const auto partition = MakePfs0WithFiles({{"main", {0}}});
+    auto update = MakeDiscoveryNca(update_id, NcaHeader::ContentType::Program, partition);
+    NcaFsHeader fs{};
+    std::memcpy(&fs, update.data() + NcaHeader::Size, sizeof(fs));
+    fs.encryption_type = NcaFsHeader::EncryptionType::AesCtrEx;
+    Put(update, NcaHeader::Size, fs);
+    const auto file = MakeFile(
+        MakePfs0WithFiles({{"base.cnmt.nca", meta_nca(Base, TitleType::Application, 0x11)},
+                           {"update.cnmt.nca", meta_nca(update_id, update_type, 0x22)},
+                           {"11111111111111111111111111111111.nca",
+                            MakeDiscoveryNca(Base, NcaHeader::ContentType::Program, partition)},
+                           {"22222222222222222222222222222222.nca", update}}));
+    Core::System system{Service::Account::ProfileStorage::Scratch};
+    system.SetContentProvider(std::make_unique<ContentProviderUnion>());
+    Loader::AppLoader_NSP loader{file, system.GetFileSystemController(),
+                                 system.GetContentProvider(), Base, 0};
+    VirtualFile packed;
+    REQUIRE(loader.ReadUpdateRaw(packed) == Loader::ResultStatus::Success);
+    REQUIRE(packed);
+    CHECK(packed->ReadAllBytes() == update);
+}
+
 TEST_CASE("NSP discovery skips unreadable NCA metadata", "[core][file_sys][nca_discovery]") {
     if (Core::Crypto::KeyManager::Instance().HasKey(Core::Crypto::S256KeyType::Header)) {
         SKIP("A header key is installed");
     }
-    Common::Log::Initialize();
+    Tests::InitializeTestLog();
     Common::Log::SetRingCapacity(1024);
     SCOPE_EXIT { Common::Log::SetRingCapacity(0); };
 
@@ -731,7 +809,7 @@ TEST_CASE("XCI discovery skips unreadable normal-partition NCAs",
     if (Core::Crypto::KeyManager::Instance().HasKey(Core::Crypto::S256KeyType::Header)) {
         SKIP("A header key is installed");
     }
-    Common::Log::Initialize();
+    Tests::InitializeTestLog();
     Common::Log::SetRingCapacity(256);
     SCOPE_EXIT { Common::Log::SetRingCapacity(0); };
 

@@ -3,6 +3,7 @@
 #include <limits>
 #include <catch2/catch_test_macros.hpp>
 
+#include "video_core/texture_cache/image_info.h"
 #include "video_core/textures/texture.h"
 
 TEST_CASE("Legacy texture indices never decode as native header offsets",
@@ -34,4 +35,32 @@ TEST_CASE("Resolved texture indices stay unchanged for both memory layouts",
         REQUIRE(TextureHeaderIndex(maximum, maximum, native_tiling) == maximum);
         REQUIRE(TextureHeaderIndex(maximum, 63, native_tiling) == maximum);
     }
+}
+
+TEST_CASE("Native texture descriptors preserve the requested GOB order",
+          "[video_core][texture_layout]") {
+    using namespace Tegra::Texture;
+    TICEntry atlas{.raw = {}};
+    atlas.format.Assign(TextureFormat::BC7U);
+    atlas.r_type.Assign(ComponentType::UNORM);
+    atlas.g_type.Assign(ComponentType::UNORM);
+    atlas.b_type.Assign(ComponentType::UNORM);
+    atlas.a_type.Assign(ComponentType::UNORM);
+    atlas.texture_type.Assign(TextureType::Texture2D);
+    atlas.header_version.Assign(TICHeaderVersion::BlockLinear);
+    atlas.width_minus_one.Assign(159);
+    atlas.height_minus_1.Assign(159);
+    CHECK_FALSE(VideoCommon::ImageInfo{atlas}.maxwell_gob_layout);
+
+    atlas.raw[1] |= u64{1} << 24;
+    const VideoCommon::ImageInfo legacy{atlas};
+    CHECK(legacy.maxwell_gob_layout);
+    CHECK(legacy.format == VideoCore::Surface::PixelFormat::BC7_UNORM);
+    CHECK(legacy.size.width == 160);
+    CHECK(legacy.size.height == 160);
+
+    atlas.srgb_conversion.Assign(1);
+    CHECK(VideoCommon::ImageInfo{atlas}.maxwell_gob_layout);
+    atlas.format.Assign(TextureFormat::A8B8G8R8);
+    CHECK_FALSE(VideoCommon::ImageInfo{atlas}.maxwell_gob_layout);
 }

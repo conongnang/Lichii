@@ -930,7 +930,13 @@ struct Memory::Impl {
         const u64 addr = GetInteger(vaddr);
         bool rasterizer_write = false;
         if (auto const ptr = GetPointerImpl(addr, [addr, data]() {
-            LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
+            // As with unmapped reads, a guest spinning on a bad pointer writes unmapped memory
+            // tens of thousands of times a second (#1340's fill loop): keep the first ones and
+            // then a sample.
+            static std::atomic<u64> unmapped_writes{};
+            if (const u64 count = unmapped_writes.fetch_add(1); count < 1000 || count % 100000 == 0) {
+                LOG_ERROR(HW_Memory, "Unmapped Write{} @ {:#016x} = {:#016x}", sizeof(T) * 8, addr, u64(data));
+            }
         }, [&]() {
             HandleRasterizerWrite(addr, sizeof(T));
             rasterizer_write = true;

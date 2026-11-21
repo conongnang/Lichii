@@ -23,6 +23,7 @@
 #include "shader_recompiler/frontend/ampere/program_override.h"
 #include "core/core.h"
 #include "video_core/gpu_split.h"
+#include "video_core/dlss_contract.h"
 #include "video_core/fire_emblem_upscale.h"
 #include "video_core/front_qmd.h"
 #include "video_core/nx2_profile.h"
@@ -44,6 +45,7 @@
 #include "video_core/macro_turing_jit.h"
 #endif
 #include "video_core/rasterizer_interface.h"
+#include "video_core/texture_cache/format_lookup_table.h"
 #include "video_core/textures/decoders.h"
 
 namespace Tegra::Engines {
@@ -1488,11 +1490,16 @@ void KeplerCompute::RememberDlssMotionVectors() {
     dlss_motion_color = color->Address();
     const u32 depth_offset = dlss_chain.render_region ? 0x288 : 0x298;
     const auto depth = cbuf.size.Value() >= 0x29c ? image(depth_offset) : std::nullopt;
-    if (depth && depth->format == Texture::TextureFormat::Z32 && depth->Address() != 0 &&
-        same_grid(*depth) && depth->IsBlockLinear()) {
+    if (!depth || depth->Address() == 0 || !same_grid(*depth) || !depth->IsBlockLinear()) {
+        return;
+    }
+    // The texture cache's mapping for this TIC, so both accept the same depths. The TIC comes from
+    // the guest, so an unknown tuple is skipped instead of asserting.
+    const auto depth_format = VideoCommon::TryPixelFormatFromTextureInfo(
+        depth->format, depth->r_type, depth->g_type, depth->b_type, depth->a_type,
+        depth->srgb_conversion != 0);
+    if (depth_format && VideoCommon::DlssContract::IsUpscalerDepthFormat(*depth_format)) {
         dlss_depth = *depth;
-    } else {
-        dlss_depth.reset();
     }
 }
 
@@ -1613,22 +1620,35 @@ bool KeplerCompute::ScaleDlssRenderRegion(GPUVAddr constants,
     // Without this evaluation's jitter or usable motion vectors (a rejected pass clears them), the
     // region is still scaled, without history, rather than leaving the network's output.
     const bool use_history = jitter && motion && width <= motion->Width() &&
-                             height <= motion->Height() &&
-                             (!depth || (width <= depth->Width() && height <= depth->Height()));
+                             height <= motion->Height();
+    // A depth too small for the region is left out; history still runs (on the stand-in).
+    const bool depth_fits = depth && width <= depth->Width() && height <= depth->Height();
     Fermi2D::Surface motion_surface{};
     if (use_history) {
         motion_surface = surface(*motion);
         motion_surface.format = Tegra::RenderTargetFormat::R16G16_FLOAT;
     }
-    // The game's motion vectors point from the previous position to the current one (a rightward
-    // pan gives negative x while the scene moves left), the reverse of what the upscale expects.
+    // Measured: the vectors at cb0+0x290 are in output pixels and point to the previous position
+    // (prev = cur + mv); the raw cb0+0x284 buffer has the opposite sign (the prepass scales it by -1080).
     const std::array<f32, 2> motion_scale =
-        use_history ? std::array{-1.0f, -1.0f} : std::array{0.0f, 0.0f};
-    const bool done = rasterizer->AccelerateTemporalUpscale(
-        surface(*input), surface(*output), motion_surface,
-        use_history && depth ? &*depth : nullptr,
-        jitter ? jitter->offset : std::array{0.0f, 0.0f}, motion_scale, use_history,
-        std::array{width, height});
+        use_history ? std::array{1.0f / static_cast<f32>(output->Width()),
+                                 1.0f / static_cast<f32>(output->Height())}
+                    : std::array{0.0f, 0.0f};
+    const auto upscale = [&](bool history, const Texture::TICEntry* upscale_depth) {
+        return rasterizer->AccelerateTemporalUpscale(
+            surface(*input), surface(*output), history ? motion_surface : Fermi2D::Surface{},
+            upscale_depth, jitter ? jitter->offset : std::array{0.0f, 0.0f},
+            history ? motion_scale : std::array{0.0f, 0.0f}, history, std::array{width, height});
+    };
+    // Each refusal drops one input: the depth (it can be refused after it was prepared), then the
+    // history, which leaves the spatial draw the region always had.
+    bool done = use_history && depth_fits && upscale(true, &*depth);
+    if (!done && use_history) {
+        done = upscale(true, nullptr);
+    }
+    if (!done) {
+        done = upscale(false, nullptr);
+    }
     static u32 last_width{};
     if (width != last_width) {
         last_width = width;

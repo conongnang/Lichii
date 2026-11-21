@@ -377,6 +377,7 @@ void RemoveCacheStorage(u64 program_id) {
 
 // Metadata //
 void ResetMetadata(bool show_message) {
+    ClearHomeMenuArtworkCache();
     const QString title = tr("Reset Metadata Cache");
 
     if (!Common::FS::Exists(Common::FS::GetEdenPath(Common::FS::EdenPath::CacheDir) /

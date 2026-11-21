@@ -679,6 +679,19 @@ void KeyManager::ReloadKeys() {
     DeriveMissingMasterKeys();
 }
 
+void KeyManager::ResetKeys() {
+    s128_keys.clear();
+    s256_keys.clear();
+    common_tickets.clear();
+    personal_tickets.clear();
+    ticket_databases_loaded = false;
+    encrypted_keyblobs = {};
+    keyblobs = {};
+    eticket_extended_kek = {};
+    eticket_rsa_keypair = {};
+    ReloadKeys();
+}
+
 static bool ValidCryptoRevisionString(std::string_view base, size_t begin, size_t length) {
     if (base.size() < begin + length)
         return false;
