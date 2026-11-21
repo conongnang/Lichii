@@ -2718,6 +2718,11 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     loading_screen->show();
 
     emulation_running = true;
+    // EDEN_NX2_TAS_AUTOSTART=1: plays the TAS scripts from the boot on, for unattended runs.
+    if (std::getenv("EDEN_NX2_TAS_AUTOSTART") != nullptr) {
+        Settings::values.tas_enable.SetValue(true);
+        OnTasStartStop();
+    }
     if (ui->action_Fullscreen->isChecked()) {
         ShowFullscreen();
     } else if (!(ui->action_Single_Window_Mode->isChecked() ? isMaximized()
