@@ -170,6 +170,10 @@ private:
     /// may be skipped while it builds (asynchronous shaders, CanDiscardPendingDraw).
     [[nodiscard]] GraphicsPipeline* BuiltPipeline(GraphicsPipeline* pipeline) noexcept;
 
+    /// Whether the current draw may be skipped while its pipeline is unbuilt: CanDiscardPendingDraw
+    /// with the native depth-tested rule, for `native` draws handled in `mode`.
+    [[nodiscard]] bool CanDiscardCurrentDraw(bool native, NativePendingMode mode) const;
+
     /// How native work with an unbuilt pipeline is handled: native_async_draws, or Skip with
     /// EDEN_NX2_ASYNC_DISCARD=1.
     [[nodiscard]] NativePendingMode NativeMode() const;
@@ -331,6 +335,11 @@ private:
     /// (native_async_draws = Bounded). Only touched on the GPU thread; reset in TickFrame.
     s64 native_wait_budget_us{8000};
     s64 native_wait_used_us{}; ///< Budget spent since the last 10 s log line.
+    /// GPU thread time left in this frame for translating new graphics pipelines whose draws may
+    /// be skipped, in microseconds; reset in TickFrame.
+    s64 new_pipeline_budget_us{};
+    u64 deferred_new_pipelines{}; ///< New pipelines left for a later frame by that budget
+    std::unordered_set<u64> logged_waited_draws; ///< Pipelines whose waiting draw was logged
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
     std::unordered_set<u64> evicted_hashes;   ///< Key hashes of evicted pipelines not created again

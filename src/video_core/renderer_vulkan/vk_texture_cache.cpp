@@ -23,6 +23,7 @@
 #include "common/bit_util.h"
 #include "common/div_ceil.h"
 #include "common/literals.h"
+#include "common/memory_detect.h"
 #include "common/settings.h"
 #include "shader_recompiler/byte_addressed_image.h"
 #include "shader_recompiler/exception.h"
@@ -76,11 +77,62 @@ using VideoCore::Surface::IsPixelFormatSRGB;
 using VideoCore::Surface::SurfaceType;
 
 namespace {
+// Whether the device samples BC levels with uneven block mips (FirstUnevenBlockMip) wrong: AMD
+// drivers on discrete cards with 6 GiB or more (IsUnevenBcDevice). Set by TextureCacheRuntime.
+std::atomic<bool> uneven_bc_device{false};
+
+// The first level of a block-compressed copy of `info` whose size in 4x4 blocks is not its level
+// 0 block count shifted down (341 texels: 86 blocks at level 0, 85 texels = 22 blocks at level 2,
+// not 86 >> 2 = 21), or its level count when there is none. On AMD (RX 6600 XT, Windows driver)
+// the BC1/BC3 copies of such images show dark lines along the seams of distant terrain in title
+// 1; RGBA8 copies don't.
+[[nodiscard]] u32 FirstUnevenBlockMip(const VideoCommon::ImageInfo& info) {
+    const u32 levels = static_cast<u32>(info.resources.levels);
+    const u32 blocks_x = Common::DivCeil(info.size.width, 4U);
+    const u32 blocks_y = Common::DivCeil(info.size.height, 4U);
+    for (u32 level = 1; level < levels; ++level) {
+        const u32 level_x = Common::DivCeil((std::max)(info.size.width >> level, 1U), 4U);
+        const u32 level_y = Common::DivCeil((std::max)(info.size.height >> level, 1U), 4U);
+        if (level_x != (std::max)(blocks_x >> level, 1U) ||
+            level_y != (std::max)(blocks_y >> level, 1U)) {
+            return level;
+        }
+    }
+    return levels;
+}
+
+// ASTC that the GPU decodes and would re-compress to BC1/BC3, as far as the image and the
+// settings tell.
+[[nodiscard]] bool IsBcRecompressedAstcCandidate(const VideoCommon::ImageInfo& info) {
+    return IsPixelFormatASTC(info.format) && info.type == ImageType::e2D &&
+           info.size.depth == 1 && info.resources.levels > 1 && info.num_samples == 1 &&
+           Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu &&
+           Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed;
+}
+
+// Uneven levels no larger than this are left out of the host image, which keeps the rest in BC,
+// instead of keeping the whole image as RGBA8 (4-16x the size). Ocarina of Time's 768x768
+// textures are uneven only from their 6x6 level on; a level that small is sampled only where the
+// texture covers a few pixels, and the 12x12 level is used there instead.
+constexpr u32 MaxDroppedUnevenMipSize = 32;
+
+[[nodiscard]] bool DropsUnevenTailMips(const VideoCommon::ImageInfo& info) {
+    if (!uneven_bc_device.load(std::memory_order_relaxed) || !IsBcRecompressedAstcCandidate(info)) {
+        return false;
+    }
+    const u32 first = FirstUnevenBlockMip(info);
+    return first < static_cast<u32>(info.resources.levels) &&
+           (std::max)(info.size.width >> first, info.size.height >> first) <=
+               MaxDroppedUnevenMipSize;
+}
+
 [[nodiscard]] u32 HostMipCount(const VideoCommon::ImageInfo& info) {
     if (info.num_samples > 1)
         return 1;
+    const u32 levels = DropsUnevenTailMips(info) ? FirstUnevenBlockMip(info)
+                                                 : static_cast<u32>(info.resources.levels);
     return VideoCommon::HostMipLevelCount(info.size.width, info.size.height, info.size.depth,
-                                          static_cast<u32>(info.resources.levels));
+                                          levels);
 }
 
 [[nodiscard]] std::span<const VideoCommon::ImageCopy> HostImageCopies(
@@ -207,32 +259,8 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     return bytes * info.resources.layers > (u64{1} << 30);
 }
 
-// Whether a block-compressed copy of `info` has a mip level whose size in 4x4 blocks is not its
-// level 0 block count shifted down (341 texels: 86 blocks at level 0, 85 texels = 22 blocks at
-// level 2, not 86 >> 2 = 21). On AMD (RX 6600 XT, Windows driver) the BC1/BC3 copies of such
-// images show dark lines along the seams of distant terrain in title 1; RGBA8 copies don't.
-[[nodiscard]] bool HasUnevenBlockMips(const ImageInfo& info) {
-    const u32 blocks_x = Common::DivCeil(info.size.width, 4U);
-    const u32 blocks_y = Common::DivCeil(info.size.height, 4U);
-    for (s32 level = 1; level < info.resources.levels; ++level) {
-        const u32 level_x = Common::DivCeil((std::max)(info.size.width >> level, 1U), 4U);
-        const u32 level_y = Common::DivCeil((std::max)(info.size.height >> level, 1U), 4U);
-        if (level_x != (std::max)(blocks_x >> level, 1U) ||
-            level_y != (std::max)(blocks_y >> level, 1U)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// ASTC that would be re-compressed to BC1/BC3 but has uneven block mips (HasUnevenBlockMips) on
-// an AMD driver, which samples those wrong: kept as the GPU decoder's RGBA8 instead, like huge
-// arrays.
-[[nodiscard]] bool IsUnevenMipRgba8Astc(const Device& device, const ImageInfo& info) {
-    if (!IsPixelFormatASTC(info.format) || device.IsOptimalAstcSupported() ||
-        info.type != ImageType::e2D || info.size.depth != 1 || info.resources.levels <= 1 ||
-        Settings::values.accelerate_astc.GetValue() != Settings::AstcDecodeMode::Gpu ||
-        Settings::GetAstcRecompression() == Settings::AstcRecompression::Uncompressed) {
+[[nodiscard]] bool IsUnevenBcDevice(const Device& device) {
+    if (device.IsOptimalAstcSupported()) {
         return false;
     }
     const VkDriverIdKHR id = device.GetDriverID();
@@ -242,12 +270,38 @@ constexpr VkBorderColor ConvertBorderColor(const std::array<float, 4>& color) {
     }
     // RGBA8 is 4-16x the BC size: Ocarina of Time's uneven ASTC 8x8 images took ~3.4 GB instead
     // of ~0.6 GB at area loads on a Steam Deck, where VRAM and system RAM are the same memory and
-    // the load peaks got the emulator killed. Integrated GPUs and cards under 6 GiB keep BC.
+    // the load peaks got the emulator killed. Windows also charges device memory to the commit
+    // limit, which the guest's 12 GiB already fill most of with 16 GB of RAM. Integrated GPUs,
+    // cards under 8 GB and PCs with 16 GB of RAM or less keep BC.
     using namespace Common::Literals;
-    if (device.IsIntegrated() || device.GetDeviceLocalHeapSize() < 6_GiB) {
+    return !device.IsIntegrated() && device.GetDeviceLocalHeapSize() >= 7_GiB + 512_MiB &&
+           Common::GetMemInfo().TotalPhysicalMemory >= 20_GiB;
+}
+
+// The most an uneven-mip image may take as RGBA8: arrays (Ocarina of Time's 1365x1365x90, 852 MiB
+// against 214 MiB as BC3) keep BC.
+constexpr u64 MaxUnevenRgba8Bytes = u64{64} << 20;
+
+[[nodiscard]] u64 Rgba8Bytes(const ImageInfo& info) {
+    u64 bytes = 0;
+    for (s32 level = 0; level < info.resources.levels; ++level) {
+        bytes += u64{(std::max)(info.size.width >> level, 1U)} *
+                 (std::max)(info.size.height >> level, 1U) * 4;
+    }
+    return bytes * static_cast<u64>(info.resources.layers);
+}
+
+// ASTC that would be re-compressed to BC1/BC3 but has uneven block mips (FirstUnevenBlockMip)
+// above its smallest levels on an AMD driver, which samples those wrong: kept as the GPU
+// decoder's RGBA8 instead, like huge arrays. Uneven small levels only are dropped instead
+// (DropsUnevenTailMips).
+[[nodiscard]] bool IsUnevenMipRgba8Astc(const Device& device, const ImageInfo& info) {
+    if (!IsBcRecompressedAstcCandidate(info) || !IsUnevenBcDevice(device) ||
+        DropsUnevenTailMips(info)) {
         return false;
     }
-    return HasUnevenBlockMips(info) && !IsHugeAstcArray(device, info);
+    return FirstUnevenBlockMip(info) < static_cast<u32>(info.resources.levels) &&
+           Rgba8Bytes(info) <= MaxUnevenRgba8Bytes && !IsHugeAstcArray(device, info);
 }
 
 // A large image over Switch 2 sparse blocks nobody has written (title 1's terrain layer pools, 2.9
@@ -494,7 +548,8 @@ constexpr u64 MaxFreeTranscodeBytes = u64{256} << 20;
     const auto [samples_x, samples_y] = VideoCommon::SamplesLog2(info.num_samples);
     const bool allow_storage =
         info.num_samples == 1 || device.IsStorageImageMultisampleSupported();
-    if (HostMipCount(info) < static_cast<u32>(info.resources.levels)) {
+    if (HostMipCount(info) < static_cast<u32>(info.resources.levels) &&
+        !DropsUnevenTailMips(info)) {
         static std::atomic<u32> reported{};
         if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
             LOG_WARNING(Render_Vulkan,
@@ -1325,6 +1380,7 @@ TextureCacheRuntime::TextureCacheRuntime(const Device& device_, Scheduler& sched
       resolution{Settings::values.resolution_info} {
     // Before anything below reads astc_recompression (passes, view formats).
     UseBc3ForSwitch2OnSmallCards(device);
+    uneven_bc_device.store(IsUnevenBcDevice(device), std::memory_order_relaxed);
     // Huge ASTC arrays always decode on the GPU (IsHugeAstcArray), whatever the decode setting.
     if (Settings::values.accelerate_astc.GetValue() == Settings::AstcDecodeMode::Gpu ||
         !device.IsOptimalAstcSupported()) {
@@ -3277,6 +3333,18 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                              "{} images so far",
                              info.size.width, info.size.height, info.resources.layers,
                              info.resources.levels, count);
+                }
+            } else if (DropsUnevenTailMips(info)) {
+                static std::atomic<u32> tail_images{0};
+                const u32 count = ++tail_images;
+                if (count <= 4 || (count & (count - 1)) == 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "ASTC {}x{}x{} kept in BC with {} of its {} levels (uneven BC block "
+                             "mips from {}x{}), {} images so far",
+                             info.size.width, info.size.height, info.resources.layers,
+                             HostMipCount(info), info.resources.levels,
+                             (std::max)(info.size.width >> HostMipCount(info), 1U),
+                             (std::max)(info.size.height >> HostMipCount(info), 1U), count);
                 }
             }
             break;

@@ -442,7 +442,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory, bool at_critical,
         }
         high_priority_mode = true;
         aggressive_mode = true;
-        num_iterations = 256;
+        // 48 a frame: each deletion untracks the image's guest pages, and 256 a frame gave 621 ms
+        // frames on a 1217-image trim (Ocarina of Time, RX 9070 XT). The trim has 300 frames.
+        num_iterations = 48;
         lru_cache.ForEachItemBelow(trim_before, Cleanup);
         return;
     }
@@ -1402,7 +1404,7 @@ bool TextureCache<P>::TickSceneTrim(bool out_of_memory) {
     if (scene_trim_before == 0 || out_of_memory) {
         return false;
     }
-    // At most 256 images a frame, so the load does not stall at once.
+    // At most 48 images a frame (RunGarbageCollector), so the load does not stall at once.
     const u64 before = scene_trim_images;
     RunGarbageCollector(false, false, scene_trim_before);
     if (scene_trim_images == before || ++scene_trim_frames >= 300 ||
@@ -1549,8 +1551,32 @@ void TextureCache<P>::TickFrame() {
         }
     }
     if constexpr (requires { runtime.CurrentTick(); }) {
-        while (!gpu_sentenced_images.empty() &&
+        // Destroyed a share at a time: a region trim deleted 643 images (3.4 GB) and destroying
+        // them in one frame took 895 ms (Ocarina of Time, RX 9070 XT, Windows). An eighth of what
+        // waits each frame, at least 256 MiB; all of it while memory is short, since what waits
+        // still holds device memory and commit.
+        u64 frame_limit = (std::max)(gpu_sentenced_bytes / 8, u64{256} << 20);
+        if (gpu_sentenced_bytes > frame_limit) {
+            bool short_of_memory = false;
+            if constexpr (requires { runtime.FailedImages(); }) {
+                short_of_memory |= runtime.FailedImages() != seen_failed_images;
+            }
+            if constexpr (requires { runtime.GetDeviceMemoryBudget(); }) {
+                short_of_memory |= runtime.CanReportMemoryUsage() &&
+                                   runtime.GetDeviceMemoryUsage() + 1_GiB >=
+                                       runtime.GetDeviceMemoryBudget();
+            }
+            if (const auto commit_room = Common::GetSystemCommitRoom()) {
+                short_of_memory |= *commit_room < HostCommitReserve;
+            }
+            if (short_of_memory) {
+                frame_limit = ~u64{0};
+            }
+        }
+        u64 freed = 0;
+        while (!gpu_sentenced_images.empty() && freed < frame_limit &&
                runtime.IsFree(gpu_sentenced_images.front().tick)) {
+            freed += gpu_sentenced_images.front().bytes;
             gpu_sentenced_bytes -= gpu_sentenced_images.front().bytes;
             gpu_sentenced_images.pop_front();
         }
@@ -2576,6 +2602,31 @@ bool TextureCache<P>::ColorTargetWrittenBeforeThisFrame(u32 index) noexcept {
         }
         image_id = FindImage(info, gpu_addr, RelaxedOptions{});
     }
+    if (!image_id) {
+        return false;
+    }
+    const ImageBase& image = slot_images[image_id];
+    return image.first_written_frame != 0 && image.first_written_frame < frame_tick + 1;
+}
+
+template <class P>
+bool TextureCache<P>::DepthTargetWrittenBeforeThisFrame() noexcept {
+    if (!maxwell3d) {
+        return false;
+    }
+    const auto& regs = maxwell3d->regs;
+    const GPUVAddr gpu_addr = regs.zeta.Address();
+    if (!regs.zeta_enable || gpu_addr == 0) {
+        return false;
+    }
+    const ImageInfo info(regs.zeta, regs.zeta_size, regs.anti_alias_samples_mode);
+    if (info.format == PixelFormat::Invalid || info.size.width == 0 || info.size.height == 0 ||
+        info.size.width > 65536 || info.size.height > 65536 || info.resources.layers <= 0 ||
+        info.resources.layers > 2048) {
+        return false;
+    }
+    std::scoped_lock lock{mutex};
+    const ImageId image_id = FindImage(info, gpu_addr, RelaxedOptions{});
     if (!image_id) {
         return false;
     }

@@ -102,6 +102,13 @@ public:
     /// @return True when the pipeline is built.
     [[nodiscard]] bool WaitBuilt(std::chrono::microseconds timeout);
 
+    /// Raises its build to NeedNow without waiting, for a dispatch recorded later that waits.
+    void Prioritize() {
+        if (jobs && !IsBuilt()) {
+            jobs->Promote(job, VideoCommon::ShaderJobPriority::NeedNow);
+        }
+    }
+
     /// The SPIR-V (zstd) the pipeline was built from; read it only once IsBuilt().
     [[nodiscard]] const std::vector<u8>& KeptSpirv() const noexcept {
         return kept_spirv;

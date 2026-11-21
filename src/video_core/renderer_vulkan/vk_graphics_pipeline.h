@@ -349,6 +349,11 @@ public:
         build->Build();
     }
 
+    /// Raises the build to NeedNow, for a draw that will wait for it.
+    void Prioritize() const {
+        build->Prioritize();
+    }
+
     /// Waits up to `timeout` for the build; true when built.
     [[nodiscard]] bool WaitBuilt(std::chrono::microseconds timeout) const {
         return build->WaitFor(timeout);
