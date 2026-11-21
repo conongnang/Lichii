@@ -150,6 +150,9 @@ private:
         u32 payload_size{};
         State state{};
         bool used{}; ///< Used or written in this session
+        /// A Written payload, so Find gives it back in the session that wrote it (up to
+        /// pending_limit in all)
+        std::vector<u8> pending;
     };
 
     struct EntryKey {
@@ -173,6 +176,8 @@ private:
     Common::FS::IOFile reader;
     u64 file_bytes{}; ///< The file's size with the blobs queued for it
     u64 dead_bytes{}; ///< Of those, the bytes compaction would remove
+    u64 pending_bytes{}; ///< Payloads of this session's blobs kept in memory
+    u64 pending_limit{};
     DriverBlobDiscard discarded{};
     bool closed{};
 

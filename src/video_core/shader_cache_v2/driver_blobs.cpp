@@ -8,6 +8,7 @@
 #include "common/fs/file_lock.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
+#include "common/memory_detect.h"
 #include "video_core/pipeline_cache_files.h"
 #include "video_core/shader_cache_v2/cache_file.h"
 #include "video_core/shader_cache_v2/driver_blobs.h"
@@ -93,7 +94,8 @@ std::optional<PipelineBinaries> DecodeBinaries(std::span<const u8> payload) {
 
 DriverBlobStore::DriverBlobStore(std::filesystem::path file_, const DeviceIdentity& identity,
                                  DriverBlobOptions options_)
-    : file{std::move(file_)}, options{options_} {
+    : file{std::move(file_)}, options{options_},
+      pending_limit{(std::min)(Common::GetMemInfo().TotalPhysicalMemory / 64, u64{512} << 20)} {
     {
         // Read without the lock, as the v2 log is: appends are complete records or a cut-off tail.
         const LogFile log = ReadLogFile(file);
@@ -156,10 +158,23 @@ DriverBlobStore::~DriverBlobStore() {
 std::optional<std::vector<u8>> DriverBlobStore::Find(RecordKind kind, u64 key) {
     std::scoped_lock lock{mutex};
     const auto it = index.find({kind, key});
-    if (closed || it == index.end() || it->second.state != State::Stored) {
+    if (closed || it == index.end()) {
         return std::nullopt;
     }
     Entry& entry = it->second;
+    // Written this session: the shader precache's and boot's builds, whose pipelines are gone
+    // when the game first uses them. A capturing build skips the driver's own cache, so without
+    // this each was compiled again (Ocarina of Time: 220-250 ms compute waits for pipelines the
+    // precache had built from identical SPIR-V).
+    if (entry.state == State::Written) {
+        if (entry.pending.empty()) {
+            return std::nullopt;
+        }
+        return entry.pending;
+    }
+    if (entry.state != State::Stored) {
+        return std::nullopt;
+    }
     std::vector<u8> bytes(RecordHeaderSize + entry.payload_size + RecordHashSize);
     std::optional<LogRecord> record;
     if (reader.Seek(static_cast<s64>(entry.offset)) &&
@@ -187,6 +202,8 @@ void DriverBlobStore::Reject(RecordKind kind, u64 key) {
     std::scoped_lock lock{mutex};
     if (const auto it = index.find({kind, key}); it != index.end()) {
         it->second.state = State::Rejected;
+        pending_bytes -= it->second.pending.size();
+        it->second.pending = {};
     }
 }
 
@@ -201,9 +218,14 @@ void DriverBlobStore::Store(RecordKind kind, u64 key, std::span<const u8> payloa
             return;
         }
         dead_bytes += RecordSize(it->second.payload_size);
+        pending_bytes -= it->second.pending.size();
     }
     it->second = {
         .payload_size = static_cast<u32>(payload.size()), .state = State::Written, .used = true};
+    if (pending_bytes + payload.size() <= pending_limit) {
+        it->second.pending.assign(payload.begin(), payload.end());
+        pending_bytes += payload.size();
+    }
     file_bytes += RecordSize(payload.size());
     written.fetch_add(1, std::memory_order_relaxed);
     written_bytes.fetch_add(RecordSize(payload.size()), std::memory_order_relaxed);
