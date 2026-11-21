@@ -158,9 +158,9 @@ TEST_CASE("Shader cache v2 driver blobs: a file round trip", "[video_core][shade
         for (u64 i = 0; i < 12; ++i) {
             store.Store(TestKind(i), 0x100 + i, TestPayload(i));
         }
-        // Written in this session: not stored again, and not read back before the next one
+        // Written in this session: not stored again, and read back from memory
         store.Store(TestKind(0), 0x100, TestPayload(99));
-        REQUIRE_FALSE(store.Find(TestKind(0), 0x100).has_value());
+        REQUIRE(store.Find(TestKind(0), 0x100) == TestPayload(0));
         REQUIRE(store.Counts().written == 12);
     }
     V2::DriverBlobStore store{file, TestIdentity(), {.writer = FastWriter}};
