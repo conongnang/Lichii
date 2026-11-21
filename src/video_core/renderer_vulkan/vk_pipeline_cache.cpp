@@ -469,6 +469,20 @@ vk::ShaderModule EmitComputeModule(const Device& device, const Shader::Profile& 
                                    std::vector<u8>& kept_spirv,
                                    std::span<const u32> reference = {}) {
     const std::vector<u32> code{EmitComputeShader(profile, program, shader_hash, reference)};
+    // EDEN_NX2_SPIRV_DUMP=<dir>: every compute shader's SPIR-V as <hash>.spv, and <hash>.N.spv
+    // for later emissions of the same shader (the shader precache's first, then the game's), to
+    // tell why a precached pipeline misses the driver's cache.
+    if (const char* dump = std::getenv("EDEN_NX2_SPIRV_DUMP")) {
+        static std::mutex dump_mutex;
+        std::scoped_lock lock{dump_mutex};
+        std::filesystem::path path = std::filesystem::path{dump} / fmt::format("{:016x}.spv", shader_hash);
+        for (u32 n = 2; std::filesystem::exists(path); ++n) {
+            path = std::filesystem::path{dump} / fmt::format("{:016x}.{}.spv", shader_hash, n);
+        }
+        std::ofstream file{path, std::ios::binary};
+        file.write(reinterpret_cast<const char*>(code.data()),
+                   static_cast<std::streamsize>(code.size() * sizeof(u32)));
+    }
     kept_spirv = Common::Compression::CompressDataZSTD(reinterpret_cast<const u8*>(code.data()),
                                                        code.size() * sizeof(u32), 1);
     device.SaveShader(code);
