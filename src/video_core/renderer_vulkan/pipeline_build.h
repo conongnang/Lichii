@@ -209,6 +209,13 @@ public:
                                [&] { return shared->complete.load(std::memory_order_acquire); });
     }
 
+    /// Raises the build to NeedNow without waiting: a draw recorded later waits for it.
+    void Prioritize() const {
+        if (jobs && !IsBuilt()) {
+            jobs->Promote(handle, VideoCommon::ShaderJobPriority::NeedNow);
+        }
+    }
+
     /// Waits up to `timeout` for the build, without running it on this thread. The worker sets
     /// `complete` under the mutex before notifying, so the wakeup cannot be lost.
     /// @return True when the pipeline is built.

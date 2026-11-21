@@ -2496,7 +2496,32 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
                                           ? StutterTrace::Lookup::GraphicsRecorded
                                           : StutterTrace::Lookup::GraphicsNew);
         }
+        if (!pipeline && use_asynchronous_shaders && new_pipeline_budget_us <= 0) {
+            // This frame's budget for translating new pipelines is spent: one whose draw may be
+            // skipped while it builds waits for the next frame. An area load made 179 in a few
+            // frames, 2-13 ms each of the GPU thread (Ocarina of Time: frames over 100 ms).
+            const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+            const NativePendingMode mode = native ? NativeMode() : NativePendingMode::Wait;
+            if ((!native || mode != NativePendingMode::Wait) &&
+                CanDiscardCurrentDraw(native, mode)) {
+                graphics_cache.erase(pair);
+                if ((++deferred_new_pipelines & 255) == 1) {
+                    LOG_INFO(Render_Vulkan,
+                             "Async shaders: {} new pipelines left for a later frame (the frame's "
+                             "translation budget was spent)",
+                             deferred_new_pipelines);
+                }
+                LogSkippedPipelineLookup(false);
+                return nullptr;
+            }
+        }
         if (!pipeline) {
+            const auto translate_begin = std::chrono::steady_clock::now();
+            SCOPE_EXIT {
+                new_pipeline_budget_us -= std::chrono::duration_cast<std::chrono::microseconds>(
+                                              std::chrono::steady_clock::now() - translate_begin)
+                                              .count();
+            };
             const auto keep = evicted_pointer_slots.Take(graphics_key.Hash());
             const bool evicted = evicted_hashes.erase(graphics_key.Hash()) != 0;
             if (auto kept = kept_stages.Take(graphics_key)) {
@@ -2532,6 +2557,8 @@ void PipelineCache::TickFrame() {
     ++frame_count;
     native_wait_budget_us =
         static_cast<s64>(Settings::values.native_pipeline_wait_ms.GetValue()) * 1000;
+    // At least one new pipeline a frame, so each draw waits a few frames at most.
+    new_pipeline_budget_us = 8000;
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }
@@ -2693,34 +2720,9 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
-    const auto& draw_state = maxwell3d->draw_manager.draw_state;
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     const NativePendingMode mode = native ? NativeMode() : NativePendingMode::Wait;
-    const auto& regs = maxwell3d->regs;
-    // A native draw counts as depth-tested only when every render target it writes color into
-    // was first written in an earlier frame, which the title redraws every frame: Mario Kart World
-    // bakes terrain once with depth-tested draws (b7980efd7), and a bound depth buffer alone
-    // doesn't test (Eglantine #874). Mesh draws wait unless the mesh skip setting is on.
-    const auto writes_color = [&regs](u32 rt_index) {
-        return rt_index < Maxwell::NumRenderTargets &&
-               regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
-               regs.color_mask[regs.color_mask_common ? 0 : rt_index].raw != 0;
-    };
-    const bool depth_tested =
-        native ? mode != NativePendingMode::Wait && regs.zeta_enable != 0 &&
-                     regs.depth_test_enable != 0 && !regs.IsMeshEnabled() &&
-                     ColorWritesHaveHistory(
-                         std::min<u32>(regs.rt_control.count,
-                                       static_cast<u32>(Maxwell::NumRenderTargets)),
-                         [&regs](u32 i) { return regs.rt_control.Map(i); }, writes_color,
-                         [this](u32 rt_index) {
-                             return texture_cache.ColorTargetWrittenBeforeThisFrame(rt_index);
-                         })
-               : regs.zeta_enable != 0;
-    // Native draws are judged by the heuristic only when a mode other than Wait is chosen.
-    const bool can_discard = CanDiscardPendingDraw(
-        native, depth_tested, draw_state.draw_element_count, draw_state.draw_element_count,
-        native && mode != NativePendingMode::Wait);
+    const bool can_discard = CanDiscardCurrentDraw(native, mode);
     bool discard = can_discard;
     if (native) {
         switch (DecideNativePending(mode, can_discard, native_wait_budget_us)) {
@@ -2750,7 +2752,78 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
         LogSkippedPipelineLookup(skip_mesh);
         return nullptr;
     }
+    // The worker waits for it when it records the draw: start it now, so the pipelines a frame's
+    // waiting draws need build in parallel instead of one after another on that thread (Ocarina
+    // of Time: five 110-160 ms waits in a row for one pass, worst frame in play 714 -> 303 ms).
+    pipeline->Prioritize();
+    if (native && logged_waited_draws.insert(graphics_key.Hash()).second) {
+        // Why this draw waits for its pipeline instead of being skipped (once per pipeline; the
+        // worker logs how long it waited).
+        const auto& regs = maxwell3d->regs;
+        const u32 outputs = std::min<u32>(regs.rt_control.count,
+                                          static_cast<u32>(Maxwell::NumRenderTargets));
+        u32 color_writes = 0;
+        u32 without_history = 0;
+        for (u32 i = 0; i < outputs; ++i) {
+            const u32 rt_index = regs.rt_control.Map(i);
+            if (rt_index >= Maxwell::NumRenderTargets ||
+                regs.rt[rt_index].format == Tegra::RenderTargetFormat::NONE ||
+                regs.color_mask[regs.color_mask_common ? 0 : rt_index].raw == 0) {
+                continue;
+            }
+            ++color_writes;
+            without_history += texture_cache.ColorTargetWrittenBeforeThisFrame(rt_index) ? 0 : 1;
+        }
+        LOG_INFO(Render_Vulkan,
+                 "Draw waits for graphics pipeline {:016x}: zeta={} depth_test={} mesh={} "
+                 "color_writes={} new_targets={} count={} rt0={}x{}",
+                 graphics_key.Hash(), regs.zeta_enable != 0, regs.depth_test_enable != 0,
+                 regs.IsMeshEnabled(), color_writes, without_history,
+                 maxwell3d->draw_manager.draw_state.draw_element_count, regs.rt[0].width,
+                 regs.rt[0].height);
+    }
     return pipeline;
+}
+
+bool PipelineCache::CanDiscardCurrentDraw(bool native, NativePendingMode mode) const {
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    const auto& regs = maxwell3d->regs;
+    // A native draw counts as depth-tested only when every render target it writes color into
+    // was first written in an earlier frame, which the title redraws every frame: Mario Kart World
+    // bakes terrain once with depth-tested draws (b7980efd7), and a bound depth buffer alone
+    // doesn't test (Eglantine #874). Mesh draws follow the same rule, and a depth-only draw (a
+    // shadow map) counts when its depth target was first written in an earlier frame: in Ocarina
+    // of Time those waited 12.6 of the 16 s that draws waited for new pipelines in a cold-cache run
+    // (frames over 100 ms in play 26 -> 11).
+    const auto writes_color = [&regs](u32 rt_index) {
+        return rt_index < Maxwell::NumRenderTargets &&
+               regs.rt[rt_index].format != Tegra::RenderTargetFormat::NONE &&
+               regs.color_mask[regs.color_mask_common ? 0 : rt_index].raw != 0;
+    };
+    const u32 outputs =
+        std::min<u32>(regs.rt_control.count, static_cast<u32>(Maxwell::NumRenderTargets));
+    const auto map = [&regs](u32 i) { return regs.rt_control.Map(i); };
+    const auto history_ok = [&] {
+        if (ColorWritesHaveHistory(outputs, map, writes_color, [this](u32 rt_index) {
+                return texture_cache.ColorTargetWrittenBeforeThisFrame(rt_index);
+            })) {
+            return true;
+        }
+        for (u32 i = 0; i < outputs; ++i) {
+            if (writes_color(map(i))) {
+                return false;
+            }
+        }
+        return texture_cache.DepthTargetWrittenBeforeThisFrame();
+    };
+    const bool depth_tested =
+        native ? mode != NativePendingMode::Wait && regs.zeta_enable != 0 &&
+                     regs.depth_test_enable != 0 && history_ok()
+               : regs.zeta_enable != 0;
+    // Native draws are judged by the heuristic only when a mode other than Wait is chosen.
+    return CanDiscardPendingDraw(native, depth_tested, draw_state.draw_element_count,
+                                 draw_state.draw_element_count,
+                                 native && mode != NativePendingMode::Wait);
 }
 
 bool PipelineCache::SkipUnbuiltDispatch(ComputePipeline& pipeline, bool outputs_hold_gpu_data) {
@@ -2760,6 +2833,7 @@ bool PipelineCache::SkipUnbuiltDispatch(ComputePipeline& pipeline, bool outputs_
     const NativePendingMode mode = NativeMode();
     switch (DecideNativePending(mode, outputs_hold_gpu_data, native_wait_budget_us)) {
     case NativeDrawAction::Wait:
+        pipeline.Prioritize();
         if (mode != NativePendingMode::Wait && pipeline.FirstWaitForBuild()) {
             LOG_INFO(Render_Vulkan,
                      "Compute pipeline {:016x} is still building: its dispatch waits, its outputs "

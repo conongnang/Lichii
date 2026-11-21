@@ -1698,10 +1698,15 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
             const VideoCommon::Nx2Profile::Scope scope{VideoCommon::Nx2Profile::Zone::PipelineWait};
             const auto begin = std::chrono::steady_clock::now();
             build->Wait(!worker_only_build || HeldBuildInline());
-            hold_time_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::steady_clock::now() - begin)
-                                       .count(),
-                                   std::memory_order::relaxed);
+            const auto waited = std::chrono::steady_clock::now() - begin;
+            hold_time_ns.fetch_add(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count(),
+                std::memory_order::relaxed);
+            // Every GPU channel waits with the draw, so long waits are freezes.
+            if (waited > std::chrono::milliseconds{50}) {
+                LOG_INFO(Render_Vulkan, "Draw waited {:.1f} ms for graphics pipeline {:016x}",
+                         std::chrono::duration<double, std::milli>(waited).count(), key.Hash());
+            }
         });
     }
     const bool is_rescaling{texture_cache.IsRescaling()};

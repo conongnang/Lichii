@@ -390,6 +390,9 @@ public:
     /// draws every frame, rather than one it fills once (Eglantine #874).
     [[nodiscard]] bool ColorTargetWrittenBeforeThisFrame(u32 index) noexcept;
 
+    /// Whether the bound depth target was first written in an earlier frame.
+    [[nodiscard]] bool DepthTargetWrittenBeforeThisFrame() noexcept;
+
     [[nodiscard]] const RenderTargets& GetRenderTargets() const noexcept {
         return render_targets;
     }
