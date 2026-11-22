@@ -226,9 +226,15 @@ constexpr std::array<u8, 124> SOUND_GATE{
     0x09, 0x06, 0x00, 0xB9, 0x03, 0x00, 0x00, 0x14, 0x09, 0x06, 0x40, 0xB9, 0x69, 0x00, 0x00, 0x34,
     0x7F, 0x23, 0x03, 0xD5, 0xA4, 0x3A, 0x1F, 0x17, 0xCB, 0xE6, 0x6C, 0x17,
 };
+// SOUND_FEED also counts the job's runs at SOUND_RUNS_OFFSET for the song notes' stubs.
+// stp x16, x17, [sp, #-16]! ; adrp x16, 0x4E9E000 ; ldr w17, [x16, #0xf80] ; add w17, w17, #1 ;
+// str w17, [x16, #0xf80] ; ldp x16, x17, [sp], #16 ;
 // ldr s0, [x8, #0x10] ; fmov s16, #1.0 ; fmaxnm s0, s0, s16 ; ret
-constexpr std::array<u8, 16> SOUND_FEED{
-    0x00, 0x11, 0x40, 0xBD, 0x10, 0x10, 0x2E, 0x1E, 0x00, 0x68, 0x30, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
+constexpr size_t SOUND_RUNS_OFFSET = 0x4E9EF80;
+constexpr std::array<u8, 40> SOUND_FEED{
+    0xF0, 0x47, 0xBF, 0xA9, 0xD0, 0x92, 0x00, 0x90, 0x11, 0x82, 0x4F, 0xB9, 0x31, 0x06,
+    0x00, 0x11, 0x11, 0x82, 0x0F, 0xB9, 0xF0, 0x47, 0xC1, 0xA8, 0x00, 0x11, 0x40, 0xBD,
+    0x10, 0x10, 0x2E, 0x1E, 0x00, 0x68, 0x30, 0x1E, 0xC0, 0x03, 0x5F, 0xD6,
 };
 
 // Port of Fritchii's ac52b42c80 to zero-filled slots between game functions. Use the raw step
@@ -428,6 +434,46 @@ constexpr std::array<u8, 40> SCARECROW_LAST_ROUTINE{
     0x17, 0x91, 0xA6, 0xFF, 0xFF, 0x97, 0xE8, 0x03, 0x0D, 0x2A, 0xFE, 0x13, 0x40, 0xF9,
     0xEF, 0x43, 0x41, 0xA9, 0xED, 0x3B, 0xC3, 0xA8, 0xF4, 0x2E, 0xD9, 0x17,
 };
+// Song notes: after a song is played, its playback (main+0x3292AF0) goes on to the next note on
+// each update it finds the note flag set (the call's w0), a word the sound engine sets when the
+// melody reaches a note and clears on its next run. Above 60 fps the sound gate runs that job at
+// 60 Hz, so the playback found the flag set on two or three updates in a row and showed that many
+// notes at once, ahead of the music; the ocarina's other melody playback (main+0x3292DC0) has the
+// same code. Each tbz w0, #0 after those calls (0x3292C88, 0x3292ED4) goes to a stub that keeps the
+// job's run count (SOUND_RUNS_OFFSET) at the playback's last set read, and a set read before
+// another run reads clear. At 60 fps and below the job runs every update, so every read sees a new
+// count.
+// The stubs read the flag after the game's call, so x30 and the flags are dead there.
+//   tbz w0, #0, clear ; stp x16, x17, [sp, #-32]! ; str x15, [sp, #16] ; adrp x16, 0x4E9E000 ;
+//   ldr w17, runs ; ldr w15, slot ; str w17, slot ; cmp w15, w17 ; ldr x15, [sp, #16] ;
+//   ldp x16, x17, [sp], #32 ; b.ne set ; mov w0, wzr ; clear: b <tbz target> ; set: b <site + 4>
+// A u32 per playback.
+constexpr size_t SONG_NOTE_SLOTS_OFFSET = 0x4E9EF84;
+constexpr std::array<u8, 4> SONG_NOTE_ORIGINAL_A{0x60, 0x00, 0x00, 0x36}; // tbz w0, #0, 0x3292C94
+constexpr std::array<u8, 4> SONG_NOTE_ORIGINAL_B{0x80, 0x0B, 0x00, 0x36}; // tbz w0, #0, 0x3293044
+constexpr std::array<u8, 4> SONG_NOTE_HOOK_A{0x1E, 0xCE, 0x26, 0x14};     // b main+0x3C46500
+constexpr std::array<u8, 4> SONG_NOTE_HOOK_B{0x9B, 0xCD, 0x26, 0x14};     // b main+0x3C46540
+constexpr std::array<u8, 56> SONG_NOTE_STUB_A{
+    0x80, 0x01, 0x00, 0x36, 0xF0, 0x47, 0xBE, 0xA9, 0xEF, 0x0B, 0x00, 0xF9, 0xD0, 0x92,
+    0x00, 0x90, 0x11, 0x82, 0x4F, 0xB9, 0x0F, 0x86, 0x4F, 0xB9, 0x11, 0x86, 0x0F, 0xB9,
+    0xFF, 0x01, 0x11, 0x6B, 0xEF, 0x0B, 0x40, 0xF9, 0xF0, 0x47, 0xC2, 0xA8, 0x61, 0x00,
+    0x00, 0x54, 0xE0, 0x03, 0x1F, 0x2A, 0xD9, 0x31, 0xD9, 0x17, 0xD6, 0x31, 0xD9, 0x17,
+};
+constexpr std::array<u8, 56> SONG_NOTE_STUB_B{
+    0x80, 0x01, 0x00, 0x36, 0xF0, 0x47, 0xBE, 0xA9, 0xEF, 0x0B, 0x00, 0xF9, 0xD0, 0x92,
+    0x00, 0x90, 0x11, 0x82, 0x4F, 0xB9, 0x0F, 0x8A, 0x4F, 0xB9, 0x11, 0x8A, 0x0F, 0xB9,
+    0xFF, 0x01, 0x11, 0x6B, 0xEF, 0x0B, 0x40, 0xF9, 0xF0, 0x47, 0xC2, 0xA8, 0x61, 0x00,
+    0x00, 0x54, 0xE0, 0x03, 0x1F, 0x2A, 0xB5, 0x32, 0xD9, 0x17, 0x59, 0x32, 0xD9, 0x17,
+};
+// After the solver steps' caves and before the sound gate, clear of the Hyrule Cheat Menu
+// (main+0x3C46280..0x3C46398) and the code known cheats write.
+constexpr std::array SONG_NOTES_RECORDS{
+    BuiltinPatchRecord{0x3292C88, SONG_NOTE_HOOK_A, SONG_NOTE_ORIGINAL_A},
+    BuiltinPatchRecord{0x3292ED4, SONG_NOTE_HOOK_B, SONG_NOTE_ORIGINAL_B},
+    BuiltinPatchRecord{0x3C46500, SONG_NOTE_STUB_A, {}, true},
+    BuiltinPatchRecord{0x3C46540, SONG_NOTE_STUB_B, {}, true},
+};
+constexpr std::array SONG_NOTES_STATE{BuiltinPatchState{SONG_NOTE_SLOTS_OFFSET, 8}};
 // The cloth update (Havok cloth: clothes, hair, and the wind action's phase) gets its time step as
 // scale * 1/60, without the frame step, at four sites. Above 60 fps every frame still simulates
 // 1/60 s, so cloth and wind run fast at high FPS and lag behind the game at low FPS.
@@ -624,11 +670,16 @@ constexpr std::array CLOCK_CARRY_STATE{BuiltinPatchState{0x4E9D000, 136}};
 // Dark's timer state at 0 and the water slots to 0x98.
 constexpr std::array DYNAMIC_FPS_STATES{BuiltinPatchState{0x4E9FE00, 0x98}};
 // Dynamic FPS's state and the sound gate at 0xA0, then the step counters on a page of their own:
-// cheats keep their flags at 0x4E9FF80..0x4E9FFB0 (#1873).
+// cheats keep their flags at 0x4E9FF80..0x4E9FFB0 (#1873). The sound job's run count follows the
+// step counters on their page, before the song notes' slots.
 constexpr std::array FPS_UNLOCK_STATES{
     BuiltinPatchState{0x4E9FE00, 0xA8},
     BuiltinPatchState{0x4E9EE00, 0x110},
+    BuiltinPatchState{SOUND_RUNS_OFFSET, 4},
 };
+static_assert(SOUND_RUNS_OFFSET >= 0x4E9EE00 + 0x110 &&
+              SONG_NOTE_SLOTS_OFFSET == SOUND_RUNS_OFFSET + 4 &&
+              SONG_NOTE_SLOTS_OFFSET + 8 <= 0x4E9F000);
 
 // Text speed (port of NotRexed/Hookshot#402): main+0xAFE140 steps a text pane's letter
 // animation. At 0xAFE1B4, the start of the letters' block, s0 holds the frame time that moves
@@ -772,6 +823,15 @@ constexpr std::array BUILTIN_PATCHES{
         .module = "main",
         .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
         .records = EPONA_JUMP_RECORDS,
+        .requires_patch = FPS_UNLOCK_NAME,
+    },
+    BuiltinPatch{
+        .name = "Song notes (FPS Unlock)",
+        .title_id = 0x0400486024DEC000,
+        .module = "main",
+        .build_id = "E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348",
+        .records = SONG_NOTES_RECORDS,
+        .states = SONG_NOTES_STATE,
         .requires_patch = FPS_UNLOCK_NAME,
     },
     BuiltinPatch{

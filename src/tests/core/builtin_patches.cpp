@@ -75,7 +75,9 @@ constexpr std::string_view SoundGate =
     "120240BD522A301E4022311ECB000054523A311E120200BD29008052090600B90A000014120200BD"
     "1F0600B9D4E66C171F2003D529008052090600B903000014090640B9690000347F2303D5A43A1F17"
     "CBE66C17";
-constexpr std::string_view SoundFeed = "001140BD10102E1E0068301EC0035FD6";
+// Counts the job's runs at main+0x4E9EF80 for the song notes' fix, then max(step, 1.0).
+constexpr std::string_view SoundFeed =
+    "F047BFA9D092009011824FB93106001111820FB9F047C1A8001140BD10102E1E0068301EC0035FD6";
 constexpr std::array<std::pair<size_t, std::string_view>, 7> SoundBgmCaves{{
     {sizeof(Loader::NSOHeader) + 0x17803A4,
      "5F040071A800005428B80190080547F9480000B42B010014C0035FD6"},
@@ -119,6 +121,16 @@ constexpr size_t ScarecrowLastHookOffset = sizeof(Loader::NSOHeader) + 0x32926C8
 constexpr u32 ScarecrowLastHookInstruction = 0x1426D104; // b main+0x3C46AD8
 constexpr size_t ScarecrowLastRoutineOffset = sizeof(Loader::NSOHeader) + 0x3C46AD8;
 constexpr size_t ScarecrowRoutineSize = 40;
+// The song notes' two flag tests and their stubs.
+constexpr size_t SongNoteHookOffsetA = sizeof(Loader::NSOHeader) + 0x3292C88;
+constexpr size_t SongNoteHookOffsetB = sizeof(Loader::NSOHeader) + 0x3292ED4;
+constexpr u32 SongNoteOriginalA = 0x36000060; // tbz w0, #0, 0x3292C94
+constexpr u32 SongNoteOriginalB = 0x36000B80; // tbz w0, #0, 0x3293044
+constexpr u32 SongNoteHookA = 0x1426CE1E;     // b main+0x3C46500
+constexpr u32 SongNoteHookB = 0x1426CD9B;     // b main+0x3C46540
+constexpr size_t SongNoteStubOffsetA = sizeof(Loader::NSOHeader) + 0x3C46500;
+constexpr size_t SongNoteStubOffsetB = sizeof(Loader::NSOHeader) + 0x3C46540;
+constexpr size_t SongNoteStubSize = 56;
 struct ClothDtSite {
     size_t offset;
     u32 original;
@@ -707,6 +719,51 @@ TEST_CASE("FPS Unlock fixes Epona's jump only when its hook and cave are free",
         REQUIRE(std::equal(nso.begin() + EponaCaveOffset,
                            nso.begin() + EponaCaveOffset + EponaRoutineSize,
                            patched.begin() + EponaCaveOffset));
+    }
+}
+
+TEST_CASE("FPS Unlock shows a song's notes one at a time only with its sites free",
+          "[patch_manager]") {
+    auto nso = MakeDynamicMain();
+    std::memcpy(nso.data() + SongNoteHookOffsetA, &SongNoteOriginalA, sizeof(u32));
+    std::memcpy(nso.data() + SongNoteHookOffsetB, &SongNoteOriginalB, sizeof(u32));
+    bool should_patch = false;
+    bool unlock_applies = true;
+    SECTION("Unmodified main") {
+        should_patch = true;
+    }
+    SECTION("Unknown flag test") {
+        std::memcpy(nso.data() + SongNoteHookOffsetB, &NopInstruction, sizeof(u32));
+    }
+    SECTION("Nonzero padding") {
+        nso[SongNoteStubOffsetB + SongNoteStubSize - 1] = 1;
+    }
+    SECTION("Only Dark's Dynamic FPS is enabled") {
+        unlock_applies = false;
+    }
+
+    PatchManagerTestContext context;
+    if (!unlock_applies) {
+        Settings::values.disabled_addons[OcarinaTitleId] = {std::string{FpsUnlock}};
+    }
+    const auto patched = context.Manager().PatchNSO(nso, "main");
+    REQUIRE(WordAt(patched, SoundEntryOffset) ==
+            (unlock_applies ? SoundEntryBranchInstruction : WordAt(nso, SoundEntryOffset)));
+    if (should_patch) {
+        REQUIRE(WordAt(patched, SongNoteHookOffsetA) == SongNoteHookA);
+        REQUIRE(WordAt(patched, SongNoteHookOffsetB) == SongNoteHookB);
+        REQUIRE(Common::HexToString(
+                    std::span{patched}.subspan(SongNoteStubOffsetA, SongNoteStubSize)) ==
+                "80010036F047BEA9EF0B00F9D092009011824FB90F864FB911860FB9FF01116B"
+                "EF0B40F9F047C2A861000054E0031F2AD931D917D631D917");
+        REQUIRE(Common::HexToString(
+                    std::span{patched}.subspan(SongNoteStubOffsetB, SongNoteStubSize)) ==
+                "80010036F047BEA9EF0B00F9D092009011824FB90F8A4FB9118A0FB9FF01116B"
+                "EF0B40F9F047C2A861000054E0031F2AB532D9175932D917");
+    } else {
+        REQUIRE(WordAt(patched, SongNoteHookOffsetA) == WordAt(nso, SongNoteHookOffsetA));
+        REQUIRE(WordAt(patched, SongNoteHookOffsetB) == WordAt(nso, SongNoteHookOffsetB));
+        REQUIRE(WordAt(patched, SongNoteStubOffsetA) == 0);
     }
 }
 
@@ -1621,7 +1678,8 @@ TEST_CASE("Built-in patches stay clear of the known code-patching cheats (#1873)
     REQUIRE(Core::Memory::TextCheatParser{}.Parse(cheats).size() == 8);
 
     const auto all = {MaxResolution, std::string_view{"Texture Pool x2 (built-in)"}, FpsUnlock,
-                      std::string_view{"DLSS Balanced render scale (built-in)"}};
+                      std::string_view{"DLSS Balanced render scale (built-in)"},
+                      std::string_view{"Song notes (FPS Unlock)"}};
     CHECK(CheatOverlaps(cheats, all).empty());
     CHECK(CheatOverlaps(cheats, {DynamicFps}).empty());
 }

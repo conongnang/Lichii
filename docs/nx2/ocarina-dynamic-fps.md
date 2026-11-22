@@ -112,10 +112,10 @@ Explicit timer-rate overrides still apply; existing settings are not reset.
 
 In #2049, keeping FPS Unlock enabled and limiting the emulator to 60 FPS resolved
 stuck battle music, skipped song notes and Epona's missing jump animation. The
-BGM callbacks on the sound gate's skipped frames (below) fix the battle music.
-Keeping the default at 60 is still a mitigation for the song notes and Epona's
-jump; users with a higher configured rate should keep the 60 FPS limit until
-those are resolved.
+BGM callbacks on the sound gate's skipped frames (below) fix the battle music,
+and `Song notes (FPS Unlock)` the song notes. Keeping the default at 60 is still
+a mitigation for Epona's jump; users with a higher configured rate should keep
+the 60 FPS limit until that is resolved.
 
 ## FPS Unlock: sound manager at 60 Hz
 
@@ -131,7 +131,8 @@ The sound manager job at `0x415300` (phase in `w2`: phase 0 reads the step and
 updates the sound engine, phase 1 follows) is entered every frame. FPS Unlock
 replaces its first instruction, `pacibsp`, with `b 0x3C46800` (124-byte gate)
 and its step load at `0x415334`, `ldr s0, [x8, #0x10]`, with `bl 0x3C46280`
-(16 bytes, returns `max(step, 1.0)`). In phase 0 the gate runs the job as before
+(40 bytes, returns `max(step, 1.0)` and counts the job's runs at `0x4E9EF80`
+for the song notes). In phase 0 the gate runs the job as before
 when the step is at least 1.0. Below that it adds the step to an accumulator
 at `0x4E9FEA0` and runs the job only once a whole step has built up, keeping
 the remainder. Other phases follow that frame's decision
@@ -153,6 +154,21 @@ The rest of the sound job and its step clamp still run at 60 Hz above 60 fps.
 The stub uses seven zero-filled alignment slots within `.text` at `0x17803A4`,
 `0x1780864`, `0x17808C4`, `0x1780AE4`, `0x1780D64`, `0x1780EA4`, and `0x1781044`.
 FPS Unlock checks the original bytes in each slot before it applies any records.
+
+## FPS Unlock: song notes
+
+After a song is played, its playback (`0x3292AF0`, and the ocarina's other
+melody playback at `0x3292DC0`) shows the next note on each update it finds the
+note flag set, a word the sound engine sets when the melody reaches a note and
+clears on its next run. With the sound job at 60 Hz the flag stayed set for two
+or three updates above 60 fps, and that many notes showed at once, ahead of the
+music. `Song notes (FPS Unlock)` sends the `tbz w0, #0` after each flag read
+(`0x3292C88`, `0x3292ED4`) to a 56-byte stub (`0x3C46500`, `0x3C46540`). Each
+playback keeps the sound job's run count (`0x4E9EF80`, counted by the step
+clamp) at its last set read in its own slot (`0x4E9EF84`, `0x4E9EF88`), and a
+set read before another run reads clear. At 60 fps and below the job runs every
+update, so every read sees a new count and the game's value. Port of
+Frizti/Fritchii f173837166 (behaviour after Longshot #1471 by CraftyCorvid).
 
 ## FPS Unlock step counters
 
