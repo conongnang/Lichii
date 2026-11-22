@@ -13,7 +13,8 @@ endfunction()
 
 get_timestamp(BUILD_DATE)
 
-if (LICHII_BUILD_TAG MATCHES "^build-[0-9]+$")
+# Published release tags: build-N from the run number, or a named one such as stable-5.
+if (LICHII_BUILD_TAG MATCHES "^[a-z]+-[0-9]+$")
     set(BUILD_VERSION "${LICHII_BUILD_TAG}")
     set(IS_DEV_BUILD false)
 elseif (DEFINED GIT_RELEASE)
