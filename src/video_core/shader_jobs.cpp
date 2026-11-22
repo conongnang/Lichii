@@ -153,7 +153,9 @@ u64 DefaultShaderJobBudget() {
 
 ShaderJobScheduler::ShaderJobScheduler(const ShaderJobConfig& config)
     : budget{config.memory_budget != 0 ? config.memory_budget : DefaultShaderJobBudget()},
-      background_aging{config.background_aging} {
+      background_aging{config.background_aging},
+      driver_threads{std::max<size_t>(config.driver_threads, 1)},
+      driver_workers{std::max(driver_threads, config.boost_driver_threads)} {
     stats.budget_bytes = budget;
     const auto start{[this](std::string name, bool driver) {
         threads.emplace_back([this, name = std::move(name), driver] {
@@ -166,7 +168,7 @@ ShaderJobScheduler::ShaderJobScheduler(const ShaderJobConfig& config)
     for (size_t i = 0; i < std::max<size_t>(config.cpu_threads, 1); ++i) {
         start(config.name + "Cpu", false);
     }
-    for (size_t i = 0; i < std::max<size_t>(config.driver_threads, 1); ++i) {
+    for (size_t i = 0; i < driver_workers; ++i) {
         start(config.name + "Driver", true);
     }
 }
@@ -344,6 +346,7 @@ void ShaderJobScheduler::Worker(bool driver) {
             return;
         }
         StartStage(*job, driver, Clock::now());
+        driver_running += driver ? 1 : 0;
         lock.unlock();
         if (driver) {
             RunDriver(job);
@@ -352,10 +355,26 @@ void ShaderJobScheduler::Worker(bool driver) {
         }
         job.reset();
         lock.lock();
+        driver_running -= driver ? 1 : 0;
     }
 }
 
+ShaderJobScheduler::DriverBoost::DriverBoost(ShaderJobScheduler& scheduler_)
+    : scheduler{scheduler_} {
+    std::scoped_lock lock{scheduler.mutex};
+    ++scheduler.driver_boosts;
+    scheduler.driver_condition.notify_all();
+}
+
+ShaderJobScheduler::DriverBoost::~DriverBoost() {
+    std::scoped_lock lock{scheduler.mutex};
+    --scheduler.driver_boosts;
+}
+
 ShaderJobScheduler::JobPtr ShaderJobScheduler::Pick(bool driver, Clock::time_point now) {
+    if (driver && driver_running >= (driver_boosts != 0 ? driver_workers : driver_threads)) {
+        return nullptr;
+    }
     Queue& queue{driver ? driver_queue : cpu_queue};
     const ShaderJobStatus queued{driver ? ShaderJobStatus::DriverQueued : ShaderJobStatus::Queued};
     const auto front{[&](ShaderJobPriority priority) -> std::deque<JobPtr>* {

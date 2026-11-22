@@ -128,7 +128,10 @@ struct ShaderJobStats {
 
 struct ShaderJobConfig {
     size_t cpu_threads{1};
+    /// Driver stages run at once, except while a DriverBoost is held.
     size_t driver_threads{1};
+    /// Driver workers started; a DriverBoost lets them all run. At most driver_threads when 0.
+    size_t boost_driver_threads{0};
     /// Zero means DefaultShaderJobBudget().
     u64 memory_budget{};
     /// A Background job queued this long takes every other pick from the Soon jobs submitted
@@ -182,6 +185,20 @@ public:
 
     ShaderJobStats Stats() const;
 
+    /// While one is held, every driver worker runs driver stages, not only driver_threads of
+    /// them. Stages already running when the last one is released finish; no new one starts
+    /// until fewer than driver_threads run.
+    class DriverBoost {
+    public:
+        explicit DriverBoost(ShaderJobScheduler& scheduler_);
+        ~DriverBoost();
+        DriverBoost(const DriverBoost&) = delete;
+        DriverBoost& operator=(const DriverBoost&) = delete;
+
+    private:
+        ShaderJobScheduler& scheduler;
+    };
+
 private:
     friend class ShaderJobContext;
     using JobPtr = std::shared_ptr<ShaderJobState>;
@@ -199,6 +216,11 @@ private:
 
     const u64 budget;
     const std::chrono::nanoseconds background_aging;
+    const size_t driver_threads;
+    const size_t driver_workers;
+    /// Driver stages now running on driver workers, and the DriverBoosts held
+    size_t driver_running{};
+    size_t driver_boosts{};
 
     mutable std::mutex mutex;
     std::condition_variable cpu_condition;

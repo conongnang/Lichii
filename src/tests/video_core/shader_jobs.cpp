@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -174,6 +175,43 @@ TEST_CASE("Shader jobs run the highest priority first", "[video_core][shader_job
     }
     REQUIRE(stats.priorities[2].queue_wait_ns > 0);
     REQUIRE(stats.priorities[2].max_queue_wait_ns <= stats.priorities[2].queue_wait_ns);
+}
+
+TEST_CASE("Shader jobs run every driver worker only while boosted", "[video_core][shader_jobs]") {
+    ShaderJobConfig config{Config(4, 1)};
+    config.boost_driver_threads = 3;
+    ShaderJobScheduler scheduler{config};
+    std::mutex mutex;
+    size_t running{};
+    size_t most{};
+    const auto run = [&](size_t count) {
+        most = 0;
+        std::vector<ShaderJobHandle> handles;
+        for (size_t i = 0; i < count; ++i) {
+            handles.push_back(scheduler.Submit(TwoStageJob(
+                Soon, [](ShaderJobContext&) {},
+                [&] {
+                    {
+                        std::scoped_lock lock{mutex};
+                        most = std::max(most, ++running);
+                    }
+                    std::this_thread::sleep_for(20ms);
+                    std::scoped_lock lock{mutex};
+                    --running;
+                })));
+        }
+        for (const ShaderJobHandle& handle : handles) {
+            handle.Wait();
+        }
+        return most;
+    };
+    REQUIRE(run(6) == 1);
+    {
+        const ShaderJobScheduler::DriverBoost boost{scheduler};
+        REQUIRE(run(6) > 1);
+        REQUIRE(most <= 3);
+    }
+    REQUIRE(run(6) == 1);
 }
 
 TEST_CASE("Shader jobs promote queued jobs in both queues", "[video_core][shader_jobs]") {

@@ -857,10 +857,19 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.HasBrokenParallelShaderCompiling()
             ? 1
             : std::min(cpu_threads, std::max<size_t>(std::thread::hardware_concurrency() / 2, 2));
+    // Before the game starts, the boot builds get a driver worker per CPU worker: AMD's Windows
+    // driver compiled OoT's 4,208 cached pipelines in 53.2 s on 16 threads and 36.9 s on 31
+    // (Ryzen 9 9950X3D). EDEN_NX2_BOOT_DRIVER_THREADS=0 keeps the boot to driver_threads.
+    static const bool boot_boost = [] {
+        const char* const value = std::getenv("EDEN_NX2_BOOT_DRIVER_THREADS");
+        return value == nullptr || value[0] != '0';
+    }();
+    const bool limited = device.HasBrokenParallelShaderCompiling() || device.IsAmdLegacyGcn();
     shader_jobs.emplace(VideoCommon::ShaderJobConfig{
         .cpu_threads = cpu_threads,
         .driver_threads = device.IsAmdLegacyGcn() ? std::min<size_t>(driver_threads, 2)
                                                   : driver_threads,
+        .boost_driver_threads = boot_boost && !limited ? cpu_threads : 0,
         .name = "VkShader",
     });
 }
@@ -1470,6 +1479,11 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     // The boot builds (Soon), which Loading Shaders waits for, and the background prebuild. A
     // stopped load cancels both; the workers stay for the game.
     const VideoCommon::ShaderJobBatch boot = jobs.CreateBatch();
+    // Every driver worker compiles until Loading Shaders ends, or this function returns early
+    std::optional<VideoCommon::ShaderJobScheduler::DriverBoost> boot_boost;
+    if (build_at_boot) {
+        boot_boost.emplace(jobs);
+    }
     scheduled_prebuild.emplace(jobs);
     prebuild_load_begin.reset();
     const std::stop_callback cancel_load{
@@ -1930,6 +1944,8 @@ void PipelineCache::LoadPipelinesV2(u64 title_id,
     if (prebuild_with_boot) {
         await_older();
     }
+    // The game starts: the background prebuild and play builds keep to driver_threads.
+    boot_boost.reset();
     {
         const size_t used_sessions = std::min<size_t>(
             static_cast<size_t>(std::ranges::count_if(
