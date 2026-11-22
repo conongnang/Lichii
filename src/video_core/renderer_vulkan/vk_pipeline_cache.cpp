@@ -392,29 +392,77 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
     }
     info.force_early_z = key.state.early_z != 0;
     info.y_negate = key.state.y_negate != 0;
-    // Transform feedback would capture the scaled values, a passthrough geometry shader doesn't
-    // scale the outputs it writes itself, and indexed attribute reads in the fragment stage don't
-    // undo the scaling, so all three keep native noperspective interpolation.
-    const bool geometry_passthrough{key.unique_hashes[4] != 0 &&
-                                    programs[4].is_geometry_passthrough};
-    if (key.unique_hashes[5] != 0 && !geometry_passthrough && key.state.xfb_enabled == 0 &&
-        !programs[5].info.loads_indexed_attributes) {
-        const bool has_tess{key.unique_hashes[3] != 0};
-        const bool last_pre_raster{
-            (stage == Shader::Stage::VertexB && !has_tess && !has_geometry) ||
-            (stage == Shader::Stage::TessellationEval && !has_geometry) ||
-            (stage == Shader::Stage::Geometry && has_geometry)};
-        if (stage == Shader::Stage::Fragment) {
-            info.scaled_noperspective_inputs =
-                previous_program && (previous_program->stage == Shader::Stage::VertexB ||
-                                     previous_program->stage == Shader::Stage::TessellationEval ||
-                                     previous_program->stage == Shader::Stage::Geometry);
+    // Transform feedback would capture the scaled values and indexed attribute reads in the
+    // fragment stage don't undo the scaling, so both keep native noperspective interpolation. So
+    // does a passthrough geometry shader the host runs natively (no IR writes its outputs). On AMD
+    // drivers, whose clipped interpolation the scaling works around (OoT's red flashes over wet
+    // ground and water), a lowered passthrough geometry shader scales at each EmitVertex and a
+    // mesh program in its epilogue or the mesh emulation's vertex shader; other vendors keep those
+    // native. Stages come from the programs: a task+mesh pipeline's mesh program sits in a
+    // tessellation slot.
+    if (key.unique_hashes[5] != 0) {
+        bool has_tess{};
+        bool has_mesh{};
+        const Shader::IR::Program* geometry{};
+        for (size_t index = 1; index + 1 < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] == 0) {
+                continue;
+            }
+            switch (programs[index].stage) {
+            case Shader::Stage::TessellationControl:
+            case Shader::Stage::TessellationEval:
+                has_tess = true;
+                break;
+            case Shader::Stage::Task:
+            case Shader::Stage::Mesh:
+                has_mesh = true;
+                break;
+            case Shader::Stage::Geometry:
+                geometry = &programs[index];
+                break;
+            default:
+                break;
+            }
         }
-        if (last_pre_raster) {
-            const auto& fragment_info{programs[5].info};
-            for (size_t index = 0; index < 32; ++index) {
-                if (fragment_info.interpolation[index] == Shader::Interpolation::NoPerspective) {
-                    info.noperspective_outputs.set(index);
+        const VkDriverId driver{device.GetDriverID()};
+        const bool amd{driver == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                       driver == VK_DRIVER_ID_AMD_OPEN_SOURCE || driver == VK_DRIVER_ID_MESA_RADV};
+        const bool passthrough{geometry != nullptr && geometry->is_geometry_passthrough};
+        const bool scales_passthrough{amd && !device.IsNvGeometryShaderPassthroughSupported()};
+        const auto& fragment_info{programs[5].info};
+        if ((!passthrough || scales_passthrough) && (!has_mesh || amd) &&
+            !(has_mesh && (has_tess || geometry != nullptr)) && key.state.xfb_enabled == 0 &&
+            !fragment_info.loads_indexed_attributes) {
+            const bool geometry_last{geometry != nullptr};
+            const bool last_pre_raster{
+                (stage == Shader::Stage::VertexB && !has_tess && !geometry_last && !has_mesh) ||
+                (stage == Shader::Stage::TessellationEval && !geometry_last) ||
+                (stage == Shader::Stage::Geometry && geometry_last) ||
+                stage == Shader::Stage::Mesh};
+            if (stage == Shader::Stage::Fragment) {
+                info.scaled_noperspective_inputs =
+                    previous_program &&
+                    (previous_program->stage == Shader::Stage::VertexB ||
+                     previous_program->stage == Shader::Stage::TessellationEval ||
+                     previous_program->stage == Shader::Stage::Geometry ||
+                     previous_program->stage == Shader::Stage::Mesh);
+            }
+            if (last_pre_raster) {
+                for (size_t index = 0; index < 32; ++index) {
+                    if (fragment_info.interpolation[index] ==
+                        Shader::Interpolation::NoPerspective) {
+                        info.noperspective_outputs.set(index);
+                    }
+                }
+                if (stage == Shader::Stage::Mesh) {
+                    // Per-primitive generics reach the fragment stage flat, unscaled.
+                    for (const u32 line : program.mesh.primitive_lines) {
+                        const auto attribute{static_cast<Shader::IR::Attribute>(line)};
+                        if (Shader::IR::IsGeneric(attribute)) {
+                            info.noperspective_outputs.reset(
+                                Shader::IR::GenericAttributeIndex(attribute));
+                        }
+                    }
                 }
             }
         }
@@ -3561,7 +3609,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
                     mesh_emulation->has_task ? mesh_emulation->args_binding : ~0U,
                     runtime_info.convert_depth_mode && !profile.support_native_ndc,
                     runtime_info.fixed_state_point_size.value_or(1.0f),
-                    mesh_emulation->primitive_id_location);
+                    mesh_emulation->primitive_id_location, runtime_info.noperspective_outputs);
             }
         }
         if (mesh_emulation && program.stage == Shader::Stage::Fragment) {

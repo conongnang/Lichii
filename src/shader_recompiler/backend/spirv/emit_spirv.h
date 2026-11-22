@@ -70,11 +70,13 @@ constexpr u32 MESH_EMULATION_UNUSED_VERTEX = ~0U;
 /// Per-primitive outputs go to every vertex of their primitive, which no other primitive
 /// shares, for the fragment shader to read flat (RuntimeInfo::per_primitive_flat): generics at
 /// their location, Layer and ViewportIndex as built-ins, and PrimitiveId as a u32 at
-/// primitive_id_location (~0 drops it).
+/// primitive_id_location (~0 drops it). Per-vertex generics in noperspective_generics are written
+/// times Position.w (RuntimeInfo::noperspective_outputs).
 [[nodiscard]] std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo& mesh,
                                                        u32 binding, u32 args_binding,
                                                        bool convert_depth, float point_size = 1.0f,
-                                                       u32 primitive_id_location = ~0U);
+                                                       u32 primitive_id_location = ~0U,
+                                                       std::bitset<32> noperspective_generics = {});
 
 /// Mesh emulation with a task program: push constants of the distribution pass.
 struct MeshEmulationDistributionConstants {

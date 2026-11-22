@@ -109,6 +109,41 @@ void ConvertDepth(EmitContext& ctx, Id vertex) {
     ctx.OpStore(ctx.OpAccessChain(ctx.output_f32, ctx.output_position, vertex, ctx.Const(2U)), z);
 }
 
+// RuntimeInfo::noperspective_outputs: the vertex's screen-linear
+// generic outputs again, times its Position.w, from the stage buffer's lines. The pixel program
+// reads them perspective-correct times FragCoord.w.
+void ScaleNoPerspective(EmitContext& ctx, Id vertex) {
+    const auto& lines{ctx.mesh_info.vertex_lines};
+    const auto w_line{std::ranges::find(lines, static_cast<u32>(IR::Attribute::PositionW))};
+    if (ctx.runtime_info.noperspective_outputs.none() || w_line == lines.end()) {
+        return;
+    }
+    const u32 num_lines{static_cast<u32>(lines.size())};
+    const Id group{ctx.OpShiftRightLogical(ctx.U32[1], vertex, ctx.Const(5U))};
+    const Id slot{ctx.OpBitwiseAnd(ctx.U32[1], vertex, ctx.Const(31U))};
+    const Id first{ctx.OpIAdd(ctx.U32[1], ctx.OpIMul(ctx.U32[1], group, ctx.Const(num_lines * 32)),
+                              slot)};
+    const auto read = [&](u32 line) {
+        return ctx.OpBitcast(ctx.F32[1],
+                             ctx.OpLoad(ctx.U32[1], SharedWord(ctx, ctx.mesh_attributes,
+                                                               ctx.OpIAdd(ctx.U32[1], first,
+                                                                          ctx.Const(line * 32)))));
+    };
+    const Id w{read(static_cast<u32>(w_line - lines.begin()))};
+    for (u32 line = 0; line < num_lines; ++line) {
+        const IR::Attribute attribute{lines[line]};
+        const EmitContext::MeshLineTarget& target{ctx.mesh_vertex_targets[line]};
+        if (!IR::IsGeneric(attribute) || !Sirit::ValidId(target.variable) || !target.is_float ||
+            target.element == ~0U ||
+            !ctx.runtime_info.noperspective_outputs.test(IR::GenericAttributeIndex(attribute))) {
+            continue;
+        }
+        ctx.OpStore(ctx.OpAccessChain(ctx.output_f32, target.variable, vertex,
+                                      ctx.Const(target.element)),
+                    ctx.OpFMul(ctx.F32[1], read(line), w));
+    }
+}
+
 Id BufferWord(EmitContext& ctx, Id buffer, Id index) {
     return ctx.OpAccessChain(ctx.mesh_output_u32, buffer, ctx.u32_zero_value, index);
 }
@@ -300,6 +335,7 @@ void MeshEpilogue(EmitContext& ctx) {
                             point_size);
             }
             CopyLines(ctx, vertex, 0, vertex_lines, ctx.mesh_vertex_targets);
+            ScaleNoPerspective(ctx, vertex);
             if (convert_depth) {
                 ConvertDepth(ctx, vertex);
             }
@@ -512,7 +548,8 @@ void EmitMeshEpilogue(EmitContext& ctx) {
 /// moved outside the clip volume and culled with a negative ClipDistance.
 std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo& mesh, u32 binding,
                                          u32 args_binding, bool convert_depth, float point_size,
-                                         u32 primitive_id_location) {
+                                         u32 primitive_id_location,
+                                         std::bitset<32> noperspective_generics) {
     Sirit::Module module{profile.supported_spirv};
     module.AddCapability(spv::Capability::Shader);
     module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
@@ -722,6 +759,17 @@ std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo&
                            module.OpBitcast(f32_type, word));
         } else {
             module.OpStore(primitive_targets[line], word);
+        }
+    }
+    // noperspective_outputs: screen-linear generics times Position.w, which the pixel program
+    // reads perspective-correct times FragCoord.w (per-primitive generics are not in the set).
+    if (noperspective_generics.any() && Sirit::ValidId(position_w)) {
+        for (size_t index = 0; index < generics.size(); ++index) {
+            if (!noperspective_generics.test(index) || !Sirit::ValidId(generics[index])) {
+                continue;
+            }
+            const Id value{module.OpLoad(vec4_type, generics[index])};
+            module.OpStore(generics[index], module.OpVectorTimesScalar(vec4_type, value, position_w));
         }
     }
     // OpenGL-style clip space, as the mesh epilogue's ConvertDepth: z = (z + w) / 2.
