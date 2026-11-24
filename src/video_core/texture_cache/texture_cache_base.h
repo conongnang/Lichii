@@ -306,6 +306,13 @@ public:
     /// Return a reference to the given image view id
     [[nodiscard]] ImageView& GetImageView(ImageViewId id) noexcept;
 
+    /// Moves each time the view at `id` is destroyed: a saved id whose generation moved names
+    /// another view, or none.
+    [[nodiscard]] u32 ImageViewGeneration(ImageViewId id) const noexcept {
+        return id.Value() < image_view_generations.size() ? image_view_generations[id.Value()]
+                                                           : 0;
+    }
+
     /// Get the imageview from the graphics descriptor table in the specified index
     [[nodiscard]] ImageView& GetImageView(u32 index) noexcept;
 
@@ -986,6 +993,14 @@ private:
     u64 gpu_sentenced_bytes{};
 
     /// Bytes of images per device memory block, for the collector (refreshed every 60 frames).
+    void BumpImageViewGeneration(ImageViewId id) {
+        if (id.Value() >= image_view_generations.size()) {
+            image_view_generations.resize(id.Value() + 1);
+        }
+        ++image_view_generations[id.Value()];
+    }
+    std::vector<u32> image_view_generations; ///< ImageViewGeneration
+
     std::unordered_map<u64, u64> block_image_bytes;
     u64 block_image_bytes_frame{~0ULL};
     DelayedDestructionRing<ImageView, TICKS_TO_DESTROY> sentenced_image_view;
