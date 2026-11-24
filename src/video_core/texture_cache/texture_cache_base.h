@@ -393,6 +393,12 @@ public:
     /// Whether the bound depth target was first written in an earlier frame.
     [[nodiscard]] bool DepthTargetWrittenBeforeThisFrame() noexcept;
 
+    /// Compressed image memory made in the last second and this frame so far: hundreds of MiB
+    /// when a region loads, tens while play streams textures in (TickSceneTrim).
+    [[nodiscard]] u64 SceneLoadBytes() const noexcept {
+        return recent_created_bytes + frame_created_bytes;
+    }
+
     [[nodiscard]] const RenderTargets& GetRenderTargets() const noexcept {
         return render_targets;
     }
@@ -550,6 +556,9 @@ private:
     // the regions left behind and are trimmed during the load, instead of piling up until the
     // collector evicts them mid-play.
     u64 frame_created_bytes{};  ///< Device memory of the compressed images made this frame
+    /// Compressed image memory made by each frame of the last second, and their sum
+    std::deque<std::pair<std::chrono::steady_clock::time_point, u64>> recent_created;
+    u64 recent_created_bytes{};
     bool scene_burst{};
     bool scene_burst_trimmed{}; ///< This burst already started a trim
     u64 scene_burst_start{};    ///< Frame the burst began

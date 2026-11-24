@@ -1269,6 +1269,13 @@ bool TextureCache<P>::TickSceneTrim(bool out_of_memory) {
     }();
     static const char* const scene_target_env = std::getenv("EDEN_NX2_SCENE_TRIM_TARGET_MIB");
     const u64 created = std::exchange(frame_created_bytes, 0);
+    const auto now = std::chrono::steady_clock::now();
+    recent_created.emplace_back(now, created);
+    recent_created_bytes += created;
+    while (now - recent_created.front().first > std::chrono::seconds{1}) {
+        recent_created_bytes -= recent_created.front().second;
+        recent_created.pop_front();
+    }
     if (scene_load_bytes == 0) {
         return false;
     }

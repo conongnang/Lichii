@@ -189,9 +189,25 @@ public:
 
     std::optional<Shader::ReplaceConstant> GetReplaceConstBuffer(u32 bank, u32 offset) override;
 
+    /// From now on answers without the engine, so a worker can translate with this environment
+    /// while the GPU thread goes on: the stage's bound constant buffers, the texture header pool
+    /// and the other registers translation reads are copied now, as translating here would read
+    /// them. Texture descriptors and pointer mappings are still read from memory, unflushed.
+    void Detach();
+
+    /// On the GPU thread, after a detached translation: what the worker read from memory is read
+    /// again here, flushed. Null when every answer holds, so the program is what translating at
+    /// the draw that detached would have made; else the kind of answer that changed.
+    [[nodiscard]] const char* CheckDetachedReads();
+
 private:
+    struct DetachedState;
+
+    Tegra::Texture::TICEntry ReadTextureEntry(u32 handle);
+
     Tegra::Engines::Maxwell3D* maxwell3d{};
     size_t stage_index{};
+    std::shared_ptr<const DetachedState> detached;
 };
 
 class ComputeEnvironment final : public GenericEnvironment {

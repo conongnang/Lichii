@@ -71,8 +71,10 @@ public:
         DriverBuildTimes driver_builds;
     };
 
-    explicit ScheduledPrebuild(VideoCommon::ShaderJobScheduler& jobs_)
-        : jobs{jobs_}, batch{jobs_.CreateBatch()} {}
+    explicit ScheduledPrebuild(
+        VideoCommon::ShaderJobScheduler& jobs_,
+        VideoCommon::ShaderJobPriority priority_ = VideoCommon::ShaderJobPriority::Background)
+        : jobs{jobs_}, batch{jobs_.CreateBatch()}, priority{priority_} {}
 
     ~ScheduledPrebuild() {
         Stop();
@@ -92,7 +94,7 @@ public:
         auto entry = std::make_shared<Entry>();
         entry->job = jobs.Submit(
             {
-                .priority = VideoCommon::ShaderJobPriority::Background,
+                .priority = priority,
                 .cpu_bytes = cpu_bytes,
                 .driver_bytes = driver_bytes,
                 .cpu = [this, entry, translate = std::move(translate)](
@@ -172,6 +174,12 @@ public:
             }
         }
         return std::move(entry->pipeline);
+    }
+
+    /// Whether a build of `key` was added and not taken yet
+    [[nodiscard]] bool Contains(const Key& key) const {
+        std::scoped_lock lock{mutex};
+        return entries.contains(key);
     }
 
     /// Returns nullopt while the job is pending, leaving it registered for a later lookup.
@@ -255,6 +263,7 @@ private:
 
     VideoCommon::ShaderJobScheduler& jobs;
     VideoCommon::ShaderJobBatch batch;
+    VideoCommon::ShaderJobPriority priority;
     size_t translating{}; ///< Builds added and not translated yet
     Common::UniqueFunction<void> after_translations;
     size_t built{};

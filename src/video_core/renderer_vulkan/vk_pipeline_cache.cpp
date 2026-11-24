@@ -569,6 +569,15 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
     // A sixty-fourth of the RAM (16 GB: 256 MB), about 25 KB per evicted pipeline
     const u64 ram = Common::GetMemInfo().TotalPhysicalMemory;
     kept_stages = decltype(kept_stages){ram != 0 ? ram / 64 : u64{256} << 20};
+    load_hold_pipelines = [] {
+        const char* const value = std::getenv("EDEN_NX2_LOAD_HOLD_PIPELINES");
+        return value != nullptr ? static_cast<u32>(std::strtoul(value, nullptr, 10)) : 8u;
+    }();
+    load_hold_texture_bytes = [] {
+        const char* const value = std::getenv("EDEN_NX2_LOAD_HOLD_MIB");
+        return (value != nullptr ? std::strtoull(value, nullptr, 10) : 96ULL) << 20;
+    }();
+    load_hold = use_asynchronous_shaders && load_hold_pipelines != 0;
     if (Settings::values.use_vulkan_driver_pipeline_cache.GetValue() && !use_vulkan_pipeline_cache) {
         LOG_INFO(Render_Vulkan, "Driver keeps its own pipeline cache, not saving a Vulkan one");
     }
@@ -872,6 +881,14 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         .boost_driver_threads = boot_boost && !limited ? cpu_threads : 0,
         .name = "VkShader",
     });
+    static const bool async_translate = [] {
+        const char* const value = std::getenv("EDEN_NX2_ASYNC_TRANSLATE");
+        return value == nullptr || value[0] != '0';
+    }();
+    if (use_asynchronous_shaders && async_translate) {
+        // Soon: ahead of the background prebuild, behind builds a draw waits for.
+        async_translations.emplace(*shader_jobs, VideoCommon::ShaderJobPriority::Soon);
+    }
 }
 
 namespace {
@@ -979,6 +996,7 @@ void LogRuntimePipelineTotals();
 PipelineCache::~PipelineCache() {
     serialization_stop.request_stop();
     StopBackgroundJobs();
+    async_translations.reset();
     // The pipelines' builds end before the driver pipeline cache they build into goes.
     shader_jobs->Shutdown();
     Common::NoteShutdownProgress();
@@ -1413,6 +1431,11 @@ void PipelineCache::ReturnPools(std::shared_ptr<ShaderPools> pools) {
 }
 
 void PipelineCache::StopBackgroundJobs() {
+    if (async_translations) {
+        // Their builds use the pipeline binaries and caches a reload replaces.
+        async_translations.reset();
+        async_translations.emplace(*shader_jobs, VideoCommon::ShaderJobPriority::Soon);
+    }
     scheduled_prebuild.reset();
 }
 
@@ -2489,11 +2512,12 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     const auto [pair, is_new]{graphics_cache.try_emplace(graphics_key)};
     auto& pipeline{pair->second};
     if (is_new) {
-        const bool skip_mesh = scheduled_prebuild && SkipPendingMeshDraw();
+        const bool skip_mesh = scheduled_prebuild && !load_hold && SkipPendingMeshDraw();
         if (skip_mesh) {
             auto prebuilt = scheduled_prebuild->TryTakeReady(graphics_key);
             if (!prebuilt) {
                 graphics_cache.erase(pair);
+                NoteNewPendingPipeline(graphics_key.Hash());
                 LogSkippedPipelineLookup(true);
                 return nullptr;
             }
@@ -2513,7 +2537,46 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
                                           ? StutterTrace::Lookup::GraphicsRecorded
                                           : StutterTrace::Lookup::GraphicsNew);
         }
-        if (!pipeline && use_asynchronous_shaders && new_pipeline_budget_us <= 0) {
+        if (!pipeline && async_translations) {
+            // Asynchronous translation: a new pipeline whose draw may be skipped is translated and
+            // built on a worker, instead of this thread waiting for its translation (in Ocarina of
+            // Time with a cold cache, 50-600 ms of every 10 s in play, 1.7 s in a region load). A
+            // draw that can't be skipped waits for the worker. The worker answers from guest
+            // memory and the registers copied here; the answers are checked again before use.
+            bool pending = async_translations->Contains(graphics_key);
+            if (!pending && CanSkipNewPipelineDraw() &&
+                !evicted_hashes.contains(graphics_key.Hash())) {
+                pending = StartAsyncTranslation();
+            }
+            if (pending) {
+                NoteNewPendingPipeline(graphics_key.Hash());
+                auto ready = async_translations->TryTakeReady(graphics_key);
+                if (!ready && CanSkipNewPipelineDraw()) {
+                    graphics_cache.erase(pair);
+                    ++async_stats.skipped;
+                    LogSkippedPipelineLookup(false);
+                    return nullptr;
+                }
+                std::unique_ptr<AsyncTranslation> result;
+                if (ready) {
+                    result = std::move(*ready);
+                    async_stats.failed += result ? 0 : 1;
+                } else {
+                    // Promoted and waited for, or made here when it hadn't started
+                    const VideoCommon::Nx2Profile::Scope scope{
+                        VideoCommon::Nx2Profile::Zone::PipelineWait};
+                    ++async_stats.waited;
+                    result = async_translations->Take(graphics_key);
+                }
+                if (result) {
+                    pipeline = AdoptAsyncTranslation(*result);
+                }
+            }
+        }
+        if (!pipeline || !pipeline->IsBuilt()) {
+            NoteNewPendingPipeline(graphics_key.Hash());
+        }
+        if (!pipeline && use_asynchronous_shaders && !load_hold && new_pipeline_budget_us <= 0) {
             // This frame's budget for translating new pipelines is spent: one whose draw may be
             // skipped while it builds waits for the next frame. An area load made 179 in a few
             // frames, 2-13 ms each of the GPU thread (Ocarina of Time: frames over 100 ms).
@@ -2576,6 +2639,15 @@ void PipelineCache::TickFrame() {
         static_cast<s64>(Settings::values.native_pipeline_wait_ms.GetValue()) * 1000;
     // At least one new pipeline a frame, so each draw waits a few frames at most.
     new_pipeline_budget_us = 8000;
+    // A frame drawn whole under the hold with fewer new pipelines than a load asks for ends it.
+    if (load_hold && new_pending_this_frame.size() < load_hold_pipelines &&
+        frame_count > load_hold_begin_frame + 1) {
+        load_hold = false;
+        LOG_INFO(Render_Vulkan, "Load hold ends after {} frames: draws skip unbuilt pipelines again",
+                 frame_count - load_hold_begin_frame);
+    }
+    new_pending_this_frame.clear();
+    LogAsyncTranslations();
     while (!evicted_pipelines.empty() && scheduler.IsFree(evicted_pipelines.front().first)) {
         evicted_pipelines.pop_front();
     }
@@ -2737,6 +2809,10 @@ GraphicsPipeline* PipelineCache::BuiltPipeline(GraphicsPipeline* pipeline) noexc
     if (!use_asynchronous_shaders) {
         return pipeline;
     }
+    if (load_hold) {
+        pipeline->Prioritize();
+        return pipeline;
+    }
     const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
     const NativePendingMode mode = native ? NativeMode() : NativePendingMode::Wait;
     const bool can_discard = CanDiscardCurrentDraw(native, mode);
@@ -2843,8 +2919,136 @@ bool PipelineCache::CanDiscardCurrentDraw(bool native, NativePendingMode mode) c
                                  native && mode != NativePendingMode::Wait);
 }
 
+bool PipelineCache::CanSkipNewPipelineDraw() const {
+    if (!use_asynchronous_shaders || load_hold || maxwell3d->regs.transform_feedback_enabled != 0) {
+        return false;
+    }
+    const bool native = maxwell3d->GetNativeMacroEngine().native_turing;
+    const NativePendingMode mode = native ? NativeMode() : NativePendingMode::Wait;
+    return (!native || mode != NativePendingMode::Wait) && CanDiscardCurrentDraw(native, mode);
+}
+
+bool PipelineCache::StartAsyncTranslation() {
+    auto envs = std::make_shared<GraphicsEnvironments>();
+    u64 code_bytes{};
+    try {
+        GetGraphicsEnvironments(*envs, graphics_key.unique_hashes);
+    } catch (const Shader::Exception&) {
+        return false; // Made here, which reports it
+    }
+    for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+        if (graphics_key.unique_hashes[index] != 0) {
+            envs->envs[index].Detach();
+            code_bytes += envs->envs[index].CachedSizeBytes();
+        }
+    }
+    const bool added = async_translations->Add(
+        graphics_key, TranslationBytes(code_bytes), DriverCompileBytes,
+        [this, key = graphics_key, envs]() -> std::unique_ptr<AsyncTranslation> {
+            std::shared_ptr<ShaderPools> pools = TakeSparePools();
+            SCOPE_EXIT {
+                ReturnPools(std::move(pools));
+            };
+            auto pipeline = CreateGraphicsPipeline(*pools, key, envs->Span(), nullptr, false);
+            if (!pipeline) {
+                return nullptr;
+            }
+            return std::make_unique<AsyncTranslation>(
+                AsyncTranslation{.pipeline = std::move(pipeline), .envs = envs});
+        });
+    async_stats.started += added ? 1 : 0;
+    return added;
+}
+
+std::unique_ptr<GraphicsPipeline> PipelineCache::AdoptAsyncTranslation(AsyncTranslation& result) {
+    for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+        if (graphics_key.unique_hashes[index] == 0) {
+            continue;
+        }
+        if (const char* changed = result.envs->envs[index].CheckDetachedReads()) {
+            ++async_stats.changed;
+            ++async_stats.changed_by[changed];
+            return nullptr;
+        }
+    }
+    ++async_stats.adopted;
+    if (pipeline_cache_filename.empty()) {
+        return std::move(result.pipeline);
+    }
+    if (!disk_pipelines.insert(graphics_key.Hash()).second) {
+        QueueVulkanPipelineCacheFlush();
+        return std::move(result.pipeline);
+    }
+    serialization_thread.QueueWork([this, key = graphics_key, envs = result.envs] {
+        boost::container::static_vector<const GenericEnvironment*, Maxwell::MaxShaderProgram>
+            env_ptrs;
+        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] != 0) {
+                env_ptrs.push_back(&envs->envs[index]);
+            }
+        }
+        const std::vector<u8> payload{VideoCommon::SerializePipelinePayload(
+            std::span(reinterpret_cast<const char*>(&key), sizeof(key)), env_ptrs,
+            host_info.EnvironmentReadProperties())};
+        if (!payload.empty()) {
+            cache_v2->Writer().Append(VideoCommon::ShaderCacheV2::RecordKind::Graphics,
+                                      GraphicsRecordKey(key), payload);
+        }
+    });
+    QueueVulkanPipelineCacheFlush();
+    return std::move(result.pipeline);
+}
+
+void PipelineCache::LogAsyncTranslations() {
+    const auto now = std::chrono::steady_clock::now();
+    if (async_stats.started == 0 || now - async_stats_logged < std::chrono::seconds{10}) {
+        return;
+    }
+    async_stats_logged = now;
+    std::string changed_by;
+    for (const auto& [kind, count] : async_stats.changed_by) {
+        changed_by += fmt::format("{}{} {}", changed_by.empty() ? "" : ", ", count, kind);
+    }
+    LOG_INFO(Render_Vulkan,
+             "Async translation in 10 s: {} pipelines started on workers, {} adopted, {} made "
+             "here again (an answer changed: {}), {} failed; {} draws skipped meanwhile, {} "
+             "waited",
+             async_stats.started, async_stats.adopted, async_stats.changed,
+             changed_by.empty() ? "none" : changed_by, async_stats.failed, async_stats.skipped,
+             async_stats.waited);
+    async_stats = {};
+}
+
+void PipelineCache::NoteNewPendingPipeline(u64 key_hash) {
+    if (load_hold_pipelines == 0 || !use_asynchronous_shaders ||
+        !new_pending_this_frame.insert(key_hash).second || load_hold ||
+        new_pending_this_frame.size() < load_hold_pipelines) {
+        return;
+    }
+    // Only a region load holds: it also makes hundreds of MiB of compressed textures. Bursts of
+    // new pipelines in play (effects, enemies) came every few seconds in Ocarina of Time with a
+    // cold cache, and holding on each brought the freezes back.
+    // Three times the count is a load on its own: one whose textures were already loaded (Ocarina
+    // asked for 30 and 54 in one frame with 68-81 MiB of new textures).
+    const u64 texture_bytes = texture_cache.SceneLoadBytes();
+    if (texture_bytes < load_hold_texture_bytes &&
+        new_pending_this_frame.size() < 3 * size_t{load_hold_pipelines}) {
+        return;
+    }
+    load_hold = true;
+    load_hold_begin_frame = frame_count;
+    LOG_INFO(Render_Vulkan,
+             "Load hold: {} new pipelines in one frame and {} MiB of new textures, draws wait for "
+             "their pipelines until a frame is drawn whole",
+             new_pending_this_frame.size(), texture_bytes >> 20);
+}
+
 bool PipelineCache::SkipUnbuiltDispatch(ComputePipeline& pipeline, bool outputs_hold_gpu_data) {
     if (!use_asynchronous_shaders) {
+        return false;
+    }
+    if (load_hold) {
+        pipeline.Prioritize();
         return false;
     }
     const NativePendingMode mode = NativeMode();

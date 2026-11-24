@@ -12,6 +12,8 @@
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <memory>
@@ -174,6 +176,33 @@ private:
     /// with the native depth-tested rule, for `native` draws handled in `mode`.
     [[nodiscard]] bool CanDiscardCurrentDraw(bool native, NativePendingMode mode) const;
 
+    /// A pipeline translated and built on a worker from detached environments (asynchronous
+    /// translation), with the environments its translation answered from.
+    struct AsyncTranslation {
+        std::unique_ptr<GraphicsPipeline> pipeline;
+        std::shared_ptr<GraphicsEnvironments> envs;
+
+        void Build() {
+            pipeline->Build();
+        }
+        [[nodiscard]] bool Failed() const noexcept {
+            return pipeline->Failed();
+        }
+    };
+
+    /// Whether the current draw, whose pipeline is new, may be skipped while a worker makes it.
+    [[nodiscard]] bool CanSkipNewPipelineDraw() const;
+
+    /// Starts translating the current key's pipeline on a worker; false when it can't be.
+    bool StartAsyncTranslation();
+
+    /// The finished translation's pipeline when every answer it gave still holds, else null (the
+    /// pipeline is then made here). Stores it in the disk cache as a new pipeline is.
+    std::unique_ptr<GraphicsPipeline> AdoptAsyncTranslation(AsyncTranslation& result);
+
+    /// Logs the asynchronous translations every 10 s.
+    void LogAsyncTranslations();
+
     /// How native work with an unbuilt pipeline is handled: native_async_draws, or Skip with
     /// EDEN_NX2_ASYNC_DISCARD=1.
     [[nodiscard]] NativePendingMode NativeMode() const;
@@ -314,6 +343,19 @@ private:
     /// IR of the pipelines whose job emits their SPIR-V
     QueuedIrBudget queued_ir{VideoCommon::DefaultShaderJobBudget()};
     std::optional<ScheduledPrebuild<GraphicsPipelineCacheKey, GraphicsPipeline>> scheduled_prebuild;
+    /// New pipelines of skippable draws, translated and built on workers while their draws are
+    /// skipped (EDEN_NX2_ASYNC_TRANSLATE=0 translates them on the GPU thread as before).
+    std::optional<ScheduledPrebuild<GraphicsPipelineCacheKey, AsyncTranslation>> async_translations;
+    struct {
+        u64 started{};
+        u64 adopted{};
+        u64 changed{};  ///< Finished, but an answer no longer held: made on the GPU thread
+        std::map<std::string_view, u64> changed_by; ///< By the kind of answer
+        u64 failed{};   ///< Did not translate or build on the worker
+        u64 skipped{};  ///< Draws skipped while their pipeline was made on a worker
+        u64 waited{};   ///< Draws that could not be skipped and waited for the worker
+    } async_stats;
+    std::chrono::steady_clock::time_point async_stats_logged{};
     /// When the boot load that started the background prebuild began, until the prebuild is done
     std::optional<std::chrono::steady_clock::time_point> prebuild_load_begin;
 
@@ -339,6 +381,19 @@ private:
     /// be skipped, in microseconds; reset in TickFrame.
     s64 new_pipeline_budget_us{};
     u64 deferred_new_pipelines{}; ///< New pipelines left for a later frame by that budget
+    /// Load hold: while on, draws and dispatches wait for unbuilt pipelines instead of being
+    /// skipped, so a scene's first frame is drawn whole. On from boot, and from a frame that
+    /// asks for load_hold_pipelines new unbuilt pipelines while the last second made
+    /// load_hold_texture_bytes of new textures, until a frame that asks for fewer.
+    /// EDEN_NX2_LOAD_HOLD_PIPELINES sets the count (default 8; 0 turns the hold off),
+    /// EDEN_NX2_LOAD_HOLD_MIB the textures (default 96).
+    bool load_hold{};
+    u32 load_hold_pipelines{};
+    u64 load_hold_texture_bytes{};
+    u64 load_hold_begin_frame{};
+    std::unordered_set<u64> new_pending_this_frame; ///< Key hashes of this frame's new unbuilt pipelines
+    /// Counts a new pipeline this frame's draw found unbuilt, and starts the hold at the count.
+    void NoteNewPendingPipeline(u64 key_hash);
     std::unordered_set<u64> logged_waited_draws; ///< Pipelines whose waiting draw was logged
     std::deque<std::pair<u64, std::unique_ptr<GraphicsPipeline>>> evicted_pipelines; ///< (tick, pipeline)
     std::unordered_set<u64> used_and_evicted; ///< Key hashes of pipelines used this session, evicted since
