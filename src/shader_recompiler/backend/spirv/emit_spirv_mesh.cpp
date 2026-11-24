@@ -764,12 +764,13 @@ std::vector<u32> EmitMeshEmulationVertex(const Profile& profile, const MeshInfo&
     // noperspective_outputs: screen-linear generics times Position.w, which the pixel program
     // reads perspective-correct times FragCoord.w (per-primitive generics are not in the set).
     if (noperspective_generics.any() && Sirit::ValidId(position_w)) {
-        for (size_t index = 0; index < generics.size(); ++index) {
-            if (!noperspective_generics.test(index) || !Sirit::ValidId(generics[index])) {
+        for (size_t generic = 0; generic < generics.size(); ++generic) {
+            if (!noperspective_generics.test(generic) || !Sirit::ValidId(generics[generic])) {
                 continue;
             }
-            const Id value{module.OpLoad(vec4_type, generics[index])};
-            module.OpStore(generics[index], module.OpVectorTimesScalar(vec4_type, value, position_w));
+            const Id value{module.OpLoad(vec4_type, generics[generic])};
+            module.OpStore(generics[generic],
+                           module.OpVectorTimesScalar(vec4_type, value, position_w));
         }
     }
     // OpenGL-style clip space, as the mesh epilogue's ConvertDepth: z = (z + w) / 2.

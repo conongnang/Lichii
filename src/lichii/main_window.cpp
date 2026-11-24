@@ -624,11 +624,6 @@ MainWindow::MainWindow(bool has_broken_vulkan)
     }
     game_list->PopulateAsync(UISettings::values.game_dirs);
 
-    if (whats_new_pending && !UISettings::values.first_start.GetValue() &&
-        UISettings::values.show_whats_new.GetValue()) {
-        QTimer::singleShot(0, this, &MainWindow::OnWhatsNew);
-    }
-
     // Set up game list mode checkboxes.
     SetGameListMode(UISettings::values.game_list_mode.GetValue());
 
